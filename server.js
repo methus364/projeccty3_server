@@ -13,7 +13,9 @@ app.use(core())
 
 
 
-
+app.get('/',(req,res)=>{
+  res.send('Hello World')
+})
 
 readdirSync('./routes')
 .map((c)=>app.use('/api',require('./routes/'+c)))
