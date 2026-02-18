@@ -1,5 +1,5 @@
 const jwt = require("jsonwebtoken");
-const prisma = require("../config/prisma");
+const pool = require("../config/db"); // เปลี่ยนไปใช้ pool จาก db.js
 
 exports.authCheck = async (req, res, next) => {
   try {
@@ -9,55 +9,70 @@ exports.authCheck = async (req, res, next) => {
     }
     const token = headerToken.split(" ")[1];
 
+    // ตรวจสอบความถูกต้องของ Token
     const decode = jwt.verify(token, process.env.SECRET);
     req.user = decode;
 
-    const user = await prisma.user.findFirst({
-      where: {
-        email: req.user.email,
-      },
-    });
-    if (!user.enabled) {
-      return res.status(400).json({ message: "This accout cannot access" });
+    // ตรวจสอบในฐานข้อมูลว่า User นี้ยังอยู่และถูกเปิดใช้งาน (enabled) ไหม
+    const result = await pool.query(
+      'SELECT enabled FROM users WHERE email = $1 LIMIT 1',
+      [req.user.email]
+    );
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
     }
+
+    if (!user.enabled) {
+      return res.status(400).json({ message: "This account cannot access" });
+    }
+    
     next();
   } catch (err) {
-    console.log(err);
+    console.error(err);
     res.status(500).json({ message: "Token Invalid" });
   }
 };
 
 exports.subCheck = async (req, res, next) => {
   try {
-    const {email} = req.user
-    const subUser = await prisma.user.findFirst({
-        where:{email:email}
-    })
+    const { email } = req.user;
     
-    if(!subUser || subUser.role.trim() !== "SUBSCRIPTION"){
-       return res.status(403).json({message:"Acess Denied : SUBSCRIPTION Invalid"})  
+    // ดึงค่า role มาเช็คว่าเป็น SUBSCRIPTION หรือไม่
+    const result = await pool.query(
+      'SELECT role FROM users WHERE email = $1 LIMIT 1',
+      [email]
+    );
+    const user = result.rows[0];
+    
+    if (!user || user.role.trim() !== "SUBSCRIPTION") {
+       return res.status(403).json({ message: "Access Denied : SUBSCRIPTION Invalid" });
     }
-    next()
+    next();
   } catch (err) {
-    console.log(err);
-    res.status(500).json({ message: "Error SUBSCRIPTION access denined" });
+    console.error(err);
+    res.status(500).json({ message: "Error SUBSCRIPTION access denied" });
   }
 };
 
-
 exports.adminCheck = async (req, res, next) => {
   try {
-    const {email} = req.user
-    const adminUser = await prisma.user.findFirst({
-        where:{email:email}
-    })
+    const { email } = req.user;
     
-    if(!adminUser || adminUser.role.trim() !== "ADMIN"){
-       return res.status(403).json({message:"Acess Denied : Admin Invalid"})  
+    // ดึงค่า role มาเช็คว่าเป็น ADMIN หรือไม่
+    const result = await pool.query(
+      'SELECT role FROM users WHERE email = $1 LIMIT 1',
+      [email]
+    );
+    const user = result.rows[0];
+    
+    if (!user || user.role.trim() !== "ADMIN") {
+       return res.status(403).json({ message: "Access Denied : Admin Invalid" });
     }
-    next()
+    next();
   } catch (err) {
-    console.log(err);
-    res.status(500).json({ message: "Error Admin access denined" });
+    console.error(err);
+    res.status(500).json({ message: "Error Admin access denied" });
   }
 };
