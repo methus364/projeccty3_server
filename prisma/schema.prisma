@@ -1,0 +1,90 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  USER
+  SUBSCRIPTION
+  ADMIN
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  CHECKED_IN
+  CHECKED_OUT
+}
+
+model User {
+  id        Int       @id @default(autoincrement())
+  name      String
+  email     String    @unique
+  password  String?
+  role      Role      @default(USER)
+  enabled   Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  bookings  Booking[]
+}
+
+model Room {
+  id           Int               @id @default(autoincrement())
+  number       String            @unique
+  type         String            // เช่น Standard, Deluxe
+  floor        Int
+  basePrice    Float             // ราคาปกติ
+  status       Boolean           @default(true)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  bookings     Booking[]
+  specialRates RoomSpecialRate[]
+  monthlyRates RoomMonthly[]
+}
+
+model RoomMonthly {
+  id       Int     @id @default(autoincrement())
+  roomId   Int
+  month    Int
+  year     Int
+  price    Float
+  isBooked Boolean @default(false)
+  room     Room    @relation(fields: [roomId], references: [id])
+}
+
+model RoomSpecialRate {
+  id          Int      @id @default(autoincrement())
+  roomId      Int
+  description String?
+  startDate   DateTime
+  endDate     DateTime
+  price       Float    // ราคาที่จะใช้ในช่วงวันที่กำหนด
+  room        Room     @relation(fields: [roomId], references: [id])
+}
+
+model Booking {
+  id         Int           @id @default(autoincrement())
+  userId     Int
+  roomId     Int
+  startDate  DateTime
+  endDate    DateTime
+  totalPrice Float
+  status     BookingStatus @default(PENDING)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  user       User          @relation(fields: [userId], references: [id])
+  room       Room          @relation(fields: [roomId], references: [id])
+}
