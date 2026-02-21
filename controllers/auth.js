@@ -2,49 +2,97 @@ const pool = require("../config/db"); // เปลี่ยนไปใช้ po
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-
-exports.addRoom = async (req, res) => {
-  // 1. จอง Client 1 ตัวจาก Pool เพื่อทำ Transaction
-  const client = await pool.connect(); 
-  const { number, type, floor, basePrice, monthlyPrice, month, year, specialStart, specialEnd, specialPrice } = req.body;
-
+// --- Register ---
+exports.register = async (req, res) => {
   try {
-    // 2. เริ่มต้น Transaction ด้วย Client ตัวนี้
-    await client.query("BEGIN"); 
+    const { email, password, name } = req.body;
+    
+    if (!email) return res.status(400).json({ message: "Email Is Required !!!" });
+    if (!password) return res.status(400).json({ message: "Password Is Required !!!" });
 
-    // 3. Insert ลงตาราง Room
-    const roomRes = await client.query(
-      `INSERT INTO "Room" (number, type, floor, "basePrice", status, "createdAt", "updatedAt") 
-       VALUES ($1, $2, $3, $4, $5, NOW(), NOW()) RETURNING id`,
-      [number, type, floor, basePrice, true]
-    );
-    const newRoomId = roomRes.rows[0].id;
-
-    // 4. Insert ลงตาราง RoomMonthly
-    await client.query(
-      `INSERT INTO "RoomMonthly" ("roomId", month, year, price, "isBooked") 
-       VALUES ($1, $2, $3, $4, $5)`,
-      [newRoomId, month, year, monthlyPrice, false]
+    // 1. ตรวจสอบว่ามี Email หรือ Name ซ้ำไหม (ใช้ SQL OR)
+    const checkUser = await pool.query(
+      'SELECT email, name FROM "User" WHERE email = $1 OR name = $2 LIMIT 1',
+      [email, name]
     );
 
-    // 5. Insert ลงตาราง RoomSpecialRate
-    await client.query(
-      `INSERT INTO "RoomSpecialRate" ("roomId", description, "startDate", "endDate", price) 
-       VALUES ($1, $2, $3, $4, $5)`,
-      [newRoomId, "Initial setup", specialStart, specialEnd, specialPrice]
+    if (checkUser.rows.length > 0) {
+      const user = checkUser.rows[0];
+      const isEmailDup = user.email === email;
+      return res.status(400).json({
+        message: isEmailDup ? "Email already exists" : "Name already exists",
+      });
+    }
+
+    // 2. Hash Password
+    const HashPassword = await bcrypt.hash(password, 10);
+
+    // 3. บันทึกข้อมูลลงฐานข้อมูล (ใช้ INSERT INTO)
+    await pool.query(
+     'INSERT INTO "User" (email, password, name, "updatedAt") VALUES ($1, $2, $3, CURRENT_TIMESTAMP)',
+      [email, HashPassword, name]
     );
 
-    // 6. ถ้าสำเร็จหมดให้ยืนยัน
-    await client.query("COMMIT"); 
-    res.status(201).json({ success: true, roomId: newRoomId });
+    res.send("Register Success");
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "server error" });
+  }
+};
 
-  } catch (e) {
-    // 7. ถ้ามีจุดไหนพลาด ให้ยกเลิกทั้งหมดที่ทำมาใน Client ตัวนี้
-    await client.query("ROLLBACK"); 
-    console.error("Transaction Error:", e);
-    res.status(500).json({ success: false, error: e.message });
-  } finally {
-    // 8. สำคัญที่สุด: คืน Client กลับเข้า Pool เพื่อให้คนอื่นใช้งานต่อ
-    client.release(); 
+// --- Login ---
+exports.login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    console.log(typeof(password));
+    // 1. ตรวจสอบ Email ในฐานข้อมูล
+    const result = await pool.query('SELECT * FROM "User" WHERE "email" = $1 LIMIT 1', [email]);
+    const user = result.rows[0];
+
+    if (!user || !user.enabled) {
+      return res.status(400).json({ message: "User not Found or Disabled" });
+    }
+
+    // 2. ตรวจสอบรหัสผ่าน
+    const IsMatch = await bcrypt.compare(password, user.password);
+    if (!IsMatch) {
+      return res.status(401).json({ message: "Password Invalid!!!" });
+    }
+
+    // 3. สร้าง Payload
+    const payload = {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+    };
+
+    // 4. สร้าง Token
+    jwt.sign(payload, process.env.SECRET, { expiresIn: "1d" }, (err, token) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Server Error jwt" });
+      }
+      res.json({ payload, token });
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "server error" });
+  }
+};
+
+// --- Current User ---
+exports.currentUser = async (req, res) => {
+  try {
+    // เลือกเฉพาะ field ที่ต้องการเหมือนกับ select ใน Prisma
+    const result = await pool.query(
+      'SELECT id, email, name, role FROM "User" WHERE email = $1 LIMIT 1',
+      [req.user.email]
+    );
+    const user = result.rows[0];
+
+    res.json({ user });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server Error" });
   }
 };

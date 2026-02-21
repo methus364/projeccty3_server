@@ -2,7 +2,7 @@ const pool = require("../config/db"); // เปลี่ยนไปใช้ po
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-exports.addRoom = async (req, res) => {
+exports.createRoom = async (req, res) => {
     // 1. จอง Client จาก Pool เพื่อทำ Transaction
     const client = await pool.connect();
 
