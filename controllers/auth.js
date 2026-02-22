@@ -29,8 +29,8 @@ exports.register = async (req, res) => {
 
     // 3. บันทึกข้อมูลลงฐานข้อมูล (ใช้ INSERT INTO)
     await pool.query(
-     'INSERT INTO "User" (email, password, name, "updatedAt") VALUES ($1, $2, $3, CURRENT_TIMESTAMP)',
-      [email, HashPassword, name]
+     'INSERT INTO "User" (email, password, name,role, "updatedAt") VALUES ($1, $2, $3 , CURRENT_TIMESTAMP)',
+      [email, HashPassword, name , 'USER']
     );
 
     res.send("Register Success");
