@@ -6,7 +6,7 @@ const {register,login,currentUser,} = require('../controllers/auth')
 const {authCheck,subCheck,adminCheck} = require('../middlewere/authCheck')
 const {createBooking} = require('../controllers/booking') 
 
-router.post('/addRoom',createBooking)
+router.post('/booking',createBooking)
 
 
 
