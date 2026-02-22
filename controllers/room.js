@@ -96,3 +96,48 @@ exports.createRoom = async (req, res) => {
         client.release();
     }
 };
+
+exports.getRooms = async (req, res) => {
+    try {
+        // รับค่าเดือนและปีจาก Query Params (ถ้าไม่ส่งมาให้ใช้เดือน/ปี ปัจจุบัน)
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+
+        const query = `
+            SELECT 
+                r.id, 
+                r.number, 
+                r.type, 
+                r.floor, 
+                r."basePricedalliy", 
+                r."basePriceMonly",
+                r.description,
+                rm."isBooked" as "isMonthlyBooked", -- สถานะรายเดือน
+                rm.price as "currentMonthPrice"
+            FROM "Room" r
+            LEFT JOIN "RoomMonthly" rm ON r.id = rm."roomId" 
+                AND rm.month = $1 
+                AND rm.year = $2
+            WHERE r.status = true -- เฉพาะห้องที่พร้อมเปิดใช้งาน
+            ORDER BY r.floor ASC, r.number ASC;
+        `;
+
+        const { rows } = await pool.query(query, [month, year]);
+
+        res.status(200).json({
+            success: true,
+            month,
+            year,
+            count: rows.length,
+            data: rows
+        });
+
+    } catch (error) {
+        console.error("Get Rooms Error:", error);
+        res.status(500).json({
+            success: false,
+            message: "ไม่สามารถดึงข้อมูลห้องพักได้",
+            error: error.message
+        });
+    }
+};
