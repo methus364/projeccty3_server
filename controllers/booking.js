@@ -37,7 +37,7 @@ exports.createBooking = async (req, res) => {
         // หมายเหตุ: ใช้ชื่อคอลัมน์ totalPrice ตาม Schema ของคุณ
         const bookingQuery = `
             INSERT INTO "Booking" ("userId", "roomId", "startDate", "endDate", "totalPrice", "status", "createdAt", "updatedAt")
-            VALUES ($1, $2, $3, $4, $5, 'confirmed', NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, 'PENDING', NOW(), NOW())
             RETURNING id;
         `;
         const bookingRes = await client.query(bookingQuery, [userId, roomId, startDate, endDate, finalPrice]);
