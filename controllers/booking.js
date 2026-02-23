@@ -26,7 +26,7 @@ exports.createBooking = async (req, res) => {
         const dateObj = new Date(startDate);
         const checkMonthly = await client.query(
             `SELECT "isBooked" FROM "RoomMonthly" WHERE "roomId" = $1 `,
-            [roomId, dateObj.getMonth() + 1, dateObj.getFullYear()]
+            [roomId]
         );
 
         if (checkMonthly.rows[0]?.isBooked) {
@@ -47,7 +47,7 @@ exports.createBooking = async (req, res) => {
             await client.query(
                 `UPDATE "RoomMonthly" SET "isBooked" = true 
                  WHERE "roomId" = $1 `,
-                [roomId, dateObj.getMonth() + 1, dateObj.getFullYear()]
+                [roomId]
             );
         }
 
