@@ -7,7 +7,7 @@ const {authCheck,subCheck,adminCheck} = require('../middlewere/authCheck')
 const {createBooking} = require('../controllers/booking') 
 
 router.post('/booking',createBooking)
-
+router.post('/checkbooking',checkbooking)
 
 
 

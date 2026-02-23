@@ -74,3 +74,50 @@ exports.createBooking = async (req, res) => {
         client.release();
     }
 };
+
+
+exports.checkbooking = async (req, res) => {
+    // ดึง userId จาก body (เพราะใช้ router.post)
+    const { userId } = req.body; 
+
+    // ตรวจสอบเบื้องต้นว่าส่ง ID มาไหม
+    if (!userId) {
+        return res.status(400).json({ 
+            success: false, 
+            message: "กรุณาระบุ userId ที่ต้องการตรวจสอบ" 
+        });
+    }
+
+    try {
+        const query = `
+            SELECT 
+                b.id AS "bookingId",
+                b."startDate",
+                b."endDate",
+                b."totalPrice",
+                b."status" AS "bookingStatus",
+                r.number AS "roomNumber",
+                r.type AS "roomType"
+            FROM "Booking" b
+            JOIN "Room" r ON b."roomId" = r.id
+            WHERE b."userId" = $1
+            ORDER BY b."createdAt" DESC;
+        `;
+
+        const result = await pool.query(query, [userId]);
+
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+
+    } catch (error) {
+        console.error("Check Booking Error:", error);
+        res.status(500).json({ 
+            success: false, 
+            message: "Server Error", 
+            error: error.message 
+        });
+    }
+};
