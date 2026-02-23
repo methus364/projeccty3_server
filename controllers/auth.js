@@ -1,4 +1,4 @@
-const pool = require("../config/db"); // เปลี่ยนไปใช้ pool จากไฟล์ db.js ที่เราสร้างใหม่
+const pool = require("../config/db"); 
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
@@ -9,7 +9,7 @@ exports.register = async (req, res) => {
     
     if (!email) return res.status(400).json({ message: "Email Is Required !!!" });
     if (!password) return res.status(400).json({ message: "Password Is Required !!!" });
-
+    if (!name) return res.status(400).json({ message: "Name Is Required !!!" }); 
     // 1. ตรวจสอบว่ามี Email หรือ Name ซ้ำไหม (ใช้ SQL OR)
     const checkUser = await pool.query(
       'SELECT email, name FROM "User" WHERE email = $1 OR name = $2 LIMIT 1',
