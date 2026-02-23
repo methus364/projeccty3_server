@@ -15,7 +15,7 @@ exports.createBooking = async (req, res) => {
                 COALESCE(
                     (SELECT price FROM "RoomSpecialRate" 
                      WHERE "roomId" = $1 AND $2 BETWEEN "startDate" AND "endDate" LIMIT 1),
-                r."basePricedalliy"
+                r."basePricedaily"
                 ) as active_price
             FROM "Room" r WHERE r.id = $1
         `;
@@ -46,7 +46,7 @@ exports.createBooking = async (req, res) => {
         if (bookingType === 'monthly') {
             await client.query(
                 `UPDATE "RoomMonthly" SET "isBooked" = true 
-                 WHERE "roomId" = $1 AND "month" = $2 AND "year" = $3`,
+                 WHERE "roomId" = $1 `,
                 [roomId, dateObj.getMonth() + 1, dateObj.getFullYear()]
             );
         }
