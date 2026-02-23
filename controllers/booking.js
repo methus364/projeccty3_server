@@ -15,7 +15,7 @@ exports.createBooking = async (req, res) => {
                 COALESCE(
                     (SELECT price FROM "RoomSpecialRate" 
                      WHERE "roomId" = $1 AND $2 BETWEEN "startDate" AND "endDate" LIMIT 1),
-                    r."basePricedalliy"
+                    r."basePricedaily"
                 ) as active_price
             FROM "Room" r WHERE r.id = $1
         `;
