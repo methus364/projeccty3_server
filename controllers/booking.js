@@ -25,7 +25,7 @@ exports.createBooking = async (req, res) => {
         // 2. ตรวจสอบสถานะ RoomMonthly (ถ้าเป็นการจองในเดือนนั้น)
         const dateObj = new Date(startDate);
         const checkMonthly = await client.query(
-            `SELECT "isBooked" FROM "RoomMonthly" WHERE "roomId" = $1 AND "month" = $2 AND "year" = $3`,
+            `SELECT "isBooked" FROM "RoomMonthly" WHERE "roomId" = $1 `,
             [roomId, dateObj.getMonth() + 1, dateObj.getFullYear()]
         );
 
