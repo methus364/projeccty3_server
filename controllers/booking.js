@@ -122,3 +122,101 @@ exports.checkbooking = async (req, res) => {
     }
 };
 
+exports.editBooking = async (req, res) => {
+  const client = await pool.connect();
+  const { id } = req.params; // ID ของการจอง (Booking ID)
+  const {
+    startDate,
+    endDate,
+    status,
+    roomId,
+    userId
+  } = req.body;
+
+  try {
+    await client.query("BEGIN");
+
+    // 1. ตรวจสอบว่ามีข้อมูลการจองนี้อยู่จริงหรือไม่
+    const currentBookingRes = await client.query('SELECT * FROM "Booking" WHERE id = $1', [id]);
+    if (currentBookingRes.rows.length === 0) {
+      client.release();
+      return res.status(404).json({ success: false, message: "ไม่พบข้อมูลการจอง" });
+    }
+    const current = currentBookingRes.rows[0];
+
+    // 2. ถ้ามีการเปลี่ยนวันที่ หรือ เปลี่ยนห้อง ต้องตรวจสอบว่าห้องว่างหรือไม่ (Prevent Overlap)
+    // เงื่อนไข: ไม่นับรวม ID การจองของตัวเอง
+    if (startDate || endDate || roomId) {
+      const targetRoomId = roomId || current.roomId;
+      const targetStart = startDate || current.startDate;
+      const targetEnd = endDate || current.endDate;
+
+      const overlapQuery = `
+        SELECT id FROM "Booking"
+        WHERE "roomId" = $1 
+        AND id != $2
+        AND status != 'CANCELLED'
+        AND ("startDate" < $4 AND "endDate" > $3)
+      `;
+      const overlapCheck = await client.query(overlapQuery, [targetRoomId, id, targetStart, targetEnd]);
+
+      if (overlapCheck.rows.length > 0) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ 
+          success: false, 
+          message: "ไม่สามารถเปลี่ยนวันหรือห้องได้ เนื่องจากมีการจองอื่นทับซ้อนในช่วงเวลาดังกล่าว" 
+        });
+      }
+    }
+
+    // 3. คำนวณราคาใหม่ (Optional: กรณีเปลี่ยนวันที่/ห้อง แล้วต้องการอัปเดตราคาอัตโนมัติ)
+    let newTotalPrice = current.totalPrice;
+    if (startDate || endDate || roomId) {
+      const roomRes = await client.query('SELECT "basePricedaily" FROM "Room" WHERE id = $1', [roomId || current.roomId]);
+      const pricePerDay = roomRes.rows[0].basePricedaily;
+      
+      const start = new Date(startDate || current.startDate);
+      const end = new Date(endDate || current.endDate);
+      const diffTime = Math.abs(end - start);
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      newTotalPrice = diffDays * pricePerDay;
+    }
+
+    // 4. อัปเดตข้อมูลการจอง
+    const updateQuery = `
+      UPDATE "Booking" SET
+        "roomId" = $1,
+        "userId" = $2,
+        "startDate" = $3,
+        "endDate" = $4,
+        "totalPrice" = $5,
+        "status" = $6,
+        "updatedAt" = NOW()
+      WHERE id = $7
+    `;
+
+    await client.query(updateQuery, [
+      roomId || current.roomId,
+      userId || current.userId,
+      startDate || current.startDate,
+      endDate || current.endDate,
+      newTotalPrice,
+      status || current.status,
+      id
+    ]);
+
+    await client.query("COMMIT");
+    res.status(200).json({
+      success: true,
+      message: "แก้ไขข้อมูลการจองเรียบร้อยแล้ว",
+      newTotalPrice: newTotalPrice
+    });
+
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error in editBooking:", error);
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์", error: error.message });
+  } finally {
+    client.release();
+  }
+};
