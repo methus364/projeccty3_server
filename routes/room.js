@@ -4,7 +4,7 @@ const router = express.Router()
 //imp controller
 const {register,login,currentUser,} = require('../controllers/auth')
 const {authCheck,subCheck,adminCheck} = require('../middlewere/authCheck')
-const { createRoom,getRooms,searchRooms,deleteRoom } = require('../controllers/room') 
+const { createRoom,getRooms,searchRooms,deleteRoom,editRoom } = require('../controllers/room') 
 
 router.post('/addRoom',createRoom)
 router.put('/editRoom/:id',editRoom)
