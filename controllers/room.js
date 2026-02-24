@@ -187,14 +187,11 @@ exports.editRoom = async (req, res) => {
       const monthlyUpdateQuery = `
                 UPDATE "RoomMonthly" 
                 SET "price" = $1 
-                WHERE "roomId" = $2 AND "month" = $3 AND "year" = $4
+                WHERE "roomId" = $2 AND 
             `;
       await client.query(monthlyUpdateQuery, [
         basePriceMonly !== undefined ? basePriceMonly : current.basePriceMonly,
-        id,
-        month,
-        year,
-      ]);
+        id   ]);
     }
 
     await client.query("COMMIT");
