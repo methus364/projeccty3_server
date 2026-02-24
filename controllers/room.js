@@ -128,81 +128,80 @@ exports.getRooms = async (req, res) => {
 
 exports.editRoom = async (req, res) => {
   const client = await pool.connect();
-  const { id } = req.params; // ID ของห้องที่จะแก้ไข
+  const { id } = req.params; 
   const {
     number,
     type,
     floor,
-    basePrice,
-    basePriceMonly,
+    basePrice,         // คือ basePricedaily ใน DB
+    basePriceMonthly,  // คือ basePriceMonthly ใน DB
     status,
     description,
-    month,
-    year,
+    isMonthlyBooked    // สถานะจาก RoomMonthly
   } = req.body;
 
   try {
     await client.query("BEGIN");
 
-    // 1. ตรวจสอบข้อมูลเดิมจาก Database
-    const currentDataRes = await client.query(
-      'SELECT * FROM "Room" WHERE id = $1',
-      [id],
-    );
-    if (currentDataRes.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "ไม่พบห้องพักที่ต้องการแก้ไข" });
+    // 1. ตรวจสอบข้อมูลเดิม
+    const currentRes = await client.query('SELECT * FROM "Room" WHERE id = $1', [id]);
+    if (currentRes.rows.length === 0) {
+      client.release();
+      return res.status(404).json({ success: false, message: "ไม่พบห้องพักที่ต้องการแก้ไข" });
     }
-    const current = currentDataRes.rows[0];
+    const current = currentRes.rows[0];
 
-    // 2. อัปเดตตาราง Room (ใช้ค่าใหม่ หรือถ้าไม่มีให้ใช้ค่าเดิม)
+    // 2. อัปเดตตาราง Room (ใช้ชื่อฟิลด์ตาม Schema เป๊ะๆ)
     const roomUpdateQuery = `
-            UPDATE "Room" SET 
-                "number" = $1, 
-                "type" = $2, 
-                "basePricedaily" = $3, 
-                "status" = $4, 
-                "basePriceMonthly" = $5, 
-                "description" = $6, 
-                "updatedAt" = NOW()
-            WHERE id = $7
-        `;
+      UPDATE "Room" SET 
+        "number" = $1, 
+        "type" = $2, 
+        "floor" = $3,
+        "basePricedaily" = $4, 
+        "status" = $5, 
+        "basePriceMonthly" = $6, 
+        "description" = $7, 
+        "updatedAt" = NOW()
+      WHERE id = $8
+    `;
 
     await client.query(roomUpdateQuery, [
       number !== undefined ? number : current.number,
       type !== undefined ? type : current.type,
+      floor !== undefined ? parseInt(floor) : current.floor,
       basePrice !== undefined ? basePrice : current.basePricedaily,
       status !== undefined ? status : current.status,
-      basePriceMonthly !== undefined
-        ? basePriceMonthly
-        : current.basePriceMonthly,
+      basePriceMonthly !== undefined ? basePriceMonthly : current.basePriceMonthly,
       description !== undefined ? description : current.description,
-      id,
+      id
     ]);
 
-    // 3. อัปเดตราคาใน RoomMonthly (ถ้ามีการส่งเดือน ปี หรือราคามา)
-    // หมายเหตุ: จะอัปเดตเฉพาะ Row ที่ตรงกับเดือน/ปี ที่ระบุ
-    if (month && year) {
-      const monthlyUpdateQuery = `
-                UPDATE "RoomMonthly" 
-                SET "price" = $1 
-                WHERE "roomId" = $2 AND 
-            `;
-      await client.query(monthlyUpdateQuery, [
-        basePriceMonly !== undefined ? basePriceMonly : current.basePriceMonly,
-        id   ]);
-    }
+    // 3. อัปเดตตาราง RoomMonthly (เพื่อเปลี่ยนสถานะ ว่าง/ไม่ว่าง และราคาปัจจุบัน)
+    // เนื่องจาก Schema RoomMonthly ของคุณไม่มี month/year เราจะอัปเดตผ่าน roomId โดยตรง
+    const monthlyUpdateQuery = `
+      UPDATE "RoomMonthly" 
+      SET "price" = $1, "isBooked" = $2
+      WHERE "roomId" = $3
+    `;
+    
+    // ใช้ราคาใหม่ถ้าส่งมา ถ้าไม่ส่งใช้ราคาเดิมของห้อง
+    const finalMonthlyPrice = basePriceMonthly !== undefined ? basePriceMonthly : current.basePriceMonthly;
+    
+    await client.query(monthlyUpdateQuery, [
+      finalMonthlyPrice,
+      isMonthlyBooked !== undefined ? isMonthlyBooked : false, // ถ้าไม่ส่งมาให้ default เป็น false
+      id
+    ]);
 
     await client.query("COMMIT");
 
     res.status(200).json({
       success: true,
-      message: "แก้ไขข้อมูลห้องพักสำเร็จ",
+      message: "แก้ไขข้อมูลห้องพักและสถานะรายเดือนสำเร็จ",
     });
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Error in editRoom Transaction:", error);
+    console.error("Error in editRoom:", error);
     res.status(500).json({
       success: false,
       message: "เกิดข้อผิดพลาดในการแก้ไขข้อมูล",
