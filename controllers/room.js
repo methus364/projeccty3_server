@@ -270,3 +270,62 @@ exports.searchRooms = async (req, res) => {
     });
   }
 };
+
+exports.deleteRoom = async (req, res) => {
+  // 1. จอง Client จาก Pool เพื่อทำ Transaction
+  const client = await pool.connect();
+  const { id } = req.params; // รับ ID ห้องจาก URL params
+
+  try {
+    // 2. เริ่มต้น Transaction
+    await client.query("BEGIN");
+
+    // 3. ตรวจสอบก่อนว่าห้องนี้มีการจอง (Booking) ค้างอยู่หรือไม่ 
+    // (ถ้ามีคนจองอยู่ ไม่ควรให้ลบ หรือควรให้ยกเลิกการจองก่อน)
+    const checkBookingQuery = `SELECT id FROM "Booking" WHERE "roomId" = $1 AND status != 'CANCELLED' LIMIT 1`;
+    const bookingCheck = await client.query(checkBookingQuery, [id]);
+
+    if (bookingCheck.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        success: false,
+        message: "ไม่สามารถลบห้องพักได้ เนื่องจากมีการจองค้างอยู่ในระบบ",
+      });
+    }
+
+    // 4. ลบข้อมูลในตาราง RoomMonthly (Child Table)
+    await client.query('DELETE FROM "RoomMonthly" WHERE "roomId" = $1', [id]);
+
+    // 5. ลบข้อมูลในตาราง Room (Parent Table)
+    const deleteRes = await client.query('DELETE FROM "Room" WHERE id = $1', [id]);
+
+    if (deleteRes.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        success: false,
+        message: "ไม่พบห้องพักที่ต้องการลบ",
+      });
+    }
+
+    // 6. หากสำเร็จทั้งหมดให้ Commit
+    await client.query("COMMIT");
+
+    res.status(200).json({
+      success: true,
+      message: "ลบข้อมูลห้องพักและข้อมูลที่เกี่ยวข้องสำเร็จ",
+    });
+  } catch (error) {
+    // 7. หากเกิดข้อผิดพลาด ให้ Rollback
+    await client.query("ROLLBACK");
+    console.error("Error in deleteRoom Transaction:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการลบข้อมูล",
+      error: error.message,
+    });
+  } finally {
+    // 8. คืน Client กลับเข้า Pool
+    client.release();
+  }
+};
