@@ -10,7 +10,6 @@ router.post('/addRoom',createRoom)
 router.put('/editRoom/:id',editRoom)
 router.post('/search-rooms',searchRooms)
 router.delete('/deleteRoom/:id',deleteRoom)
-
 router.get('/getRoom',getRooms)
 
 
