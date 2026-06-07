@@ -1,70 +1,80 @@
-const pool = require("../config/db"); // เปลี่ยนไปใช้ pool จากไฟล์ db.js ที่เราสร้างใหม่
+const pool = require("../config/db");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
+// ==========================================
+// 1. สร้างการจองห้องพัก (createBooking)
+// ==========================================
 exports.createBooking = async (req, res) => {
     const client = await pool.connect();
-    const { roomId, userId, startDate, endDate, bookingType } = req.body;
+    // รับค่าโดยอ้างอิงตัวแปรตามสไตล์ API เดิมของคุณ
+    const { roomId, userId, startDate, endDate } = req.body;
 
     try {
         await client.query("BEGIN");
 
-        // 1. หาราคาที่ถูกต้อง (เช็ค Special Rate)
+        // 1. ดึงราคาห้องพักจริงจากความสัมพันธ์ของตาราง Rooms และ Room_Types
         const priceQuery = `
-            SELECT 
-                COALESCE(
-                    (SELECT price FROM "RoomSpecialRate" 
-                     WHERE "roomId" = $1 AND $2 BETWEEN "startDate" AND "endDate" LIMIT 1),
-                    r."basePricedaily"
-                ) as active_price
-            FROM "Room" r WHERE r.id = $1
+            SELECT rt.room_price, r.room_status 
+            FROM Rooms r
+            JOIN Room_Types rt ON r.room_type_id = rt.room_type_id
+            WHERE r.room_id = $1 LIMIT 1
         `;
-        const priceRes = await client.query(priceQuery, [roomId, startDate]);
-        if (priceRes.rows.length === 0) throw new Error("ไม่พบข้อมูลห้องพัก");
-        const finalPrice = priceRes.rows[0].active_price;
+        const priceRes = await client.query(priceQuery, [roomId]);
+        
+        if (priceRes.rows.length === 0) {
+            throw new Error("ไม่พบข้อมูลห้องพักนี้ในระบบ");
+        }
+        
+        const { room_price, room_status } = priceRes.rows[0];
 
-        // 2. เช็กการจองซ้อน (Overlap Booking Check) *** จุดที่เพิ่มเข้ามา ***
-        // เงื่อนไขคือ: (วันเริ่มใหม่ < วันจบที่มีอยู่) AND (วันจบใหม่ > วันเริ่มที่มีอยู่)
+        // ตรวจสอบเบื้องต้นว่าห้องปิดปรับปรุงอยู่หรือไม่
+        if (room_status === 'ปิดปรับปรุง') {
+            throw new Error("ห้องพักนี้ปิดปรับปรุงอยู่ ไม่สามารถจองได้");
+        }
+
+        // 2. เช็กการจองซ้อน (Overlap Booking Check) 
+        // เงื่อนไข: (วันเริ่มใหม่ < วันจบที่มีอยู่) AND (วันจบใหม่ > วันเริ่มที่มีอยู่) และบิลนั้นยังไม่ถูกยกเลิก
         const overlapQuery = `
-            SELECT id FROM "Booking"
-            WHERE "roomId" = $1 
-            AND "status" != 'CANCELLED'
-            AND ($2 < "endDate" AND $3 > "startDate")
+            SELECT booking_id FROM Bookings
+            WHERE room_id = $1 
+            AND booking_status NOT IN ('ยกเลิก', 'ย้ายออกแล้ว')
+            AND ($2 < check_out_date AND $3 > check_in_date)
             LIMIT 1;
         `;
         const overlapRes = await client.query(overlapQuery, [roomId, startDate, endDate]);
         
         if (overlapRes.rows.length > 0) {
-            throw new Error("ห้องนี้ถูกจองแล้วในช่วงเวลาดังกล่าว");
+            throw new Error("ห้องนี้ถูกจองหรือมีผู้เช่าพักอยู่แล้วในช่วงเวลาดังกล่าว");
         }
 
-        // 3. ตรวจสอบสถานะ RoomMonthly (กรณีจองรายวันแต่ติดคนเช่ารายเดือน)
-        const checkMonthly = await client.query(
-            `SELECT "isBooked" FROM "RoomMonthly" WHERE "roomId" = $1`,
+        // 3. คำนวณราคาสุทธิ (จำนวนวัน X ราคาห้องต่อวัน)
+        const start = new Date(startDate);
+        const end = new Date(endDate);
+        const diffTime = Math.abs(end - start);
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1; // กันกรณีจองวันเดียวกัน ให้คิดเป็น 1 วัน
+        const totalPrice = diffDays * room_price;
+
+        // 4. บันทึกข้อมูลลงตาราง Bookings (ตามโครงสร้างฐานข้อมูลใหม่)
+        const bookingQuery = `
+            INSERT INTO Bookings (member_id, room_id, check_in_date, check_out_date, booking_status)
+            VALUES ($1, $2, $3, $4, 'รอชำระมัดจำ')
+            RETURNING booking_id;
+        `;
+        const bookingRes = await client.query(bookingQuery, [userId, roomId, startDate, endDate]);
+
+        // 5. อัปเดตสถานะห้องพักให้เป็น 'มีผู้เช่า' ทันที
+        await client.query(
+            `UPDATE Rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`,
             [roomId]
         );
-        if (checkMonthly.rows[0]?.isBooked) {
-            throw new Error("ห้องนี้ถูกจองแบบรายเดือนไว้แล้ว ไม่สามารถจองรายวันได้");
-        }
-
-        // 4. บันทึกข้อมูลลงตาราง Booking
-        const bookingQuery = `
-            INSERT INTO "Booking" ("userId", "roomId", "startDate", "endDate", "totalPrice", "status", "createdAt", "updatedAt")
-            VALUES ($1, $2, $3, $4, $5, 'PENDING', NOW(), NOW())
-            RETURNING id;
-        `;
-        const bookingRes = await client.query(bookingQuery, [userId, roomId, startDate, endDate, finalPrice]);
-
-        // 5. ถ้าเป็นการจองรายเดือน ให้ Update RoomMonthly
-        if (bookingType === 'monthly') {
-            await client.query(
-                `UPDATE "RoomMonthly" SET "isBooked" = true WHERE "roomId" = $1`,
-                [roomId]
-            );
-        }
 
         await client.query("COMMIT");
-        res.status(201).json({ success: true, bookingId: bookingRes.rows[0].id });
+        res.status(201).json({ 
+            success: true, 
+            bookingId: bookingRes.rows[0].booking_id,
+            totalPrice: totalPrice 
+        });
 
     } catch (error) {
         await client.query("ROLLBACK");
@@ -75,12 +85,12 @@ exports.createBooking = async (req, res) => {
     }
 };
 
-
+// ==========================================
+// 2. ตรวจสอบประวัติการจองของผู้ใช้ (checkbooking)
+// ==========================================
 exports.checkbooking = async (req, res) => {
-    // ดึง userId จาก body (เพราะใช้ router.post)
     const { userId } = req.body; 
 
-    // ตรวจสอบเบื้องต้นว่าส่ง ID มาไหม
     if (!userId) {
         return res.status(400).json({ 
             success: false, 
@@ -91,17 +101,18 @@ exports.checkbooking = async (req, res) => {
     try {
         const query = `
             SELECT 
-                b.id AS "bookingId",
-                b."startDate",
-                b."endDate",
-                b."totalPrice",
-                b."status" AS "bookingStatus",
-                r.number AS "roomNumber",
-                r.type AS "roomType"
-            FROM "Booking" b
-            JOIN "Room" r ON b."roomId" = r.id
-            WHERE b."userId" = $1
-            ORDER BY b."createdAt" DESC;
+                b.booking_id AS "bookingId",
+                b.check_in_date AS "startDate",
+                b.check_out_date AS "endDate",
+                b.booking_status AS "bookingStatus",
+                r.room_number AS "roomNumber",
+                rt.type_name AS "roomType",
+                rt.room_price AS "pricePerDay"
+            FROM Bookings b
+            JOIN Rooms r ON b.room_id = r.room_id
+            JOIN Room_Types rt ON r.room_type_id = rt.room_type_id
+            WHERE b.member_id = $1
+            ORDER BY b.booking_date DESC;
         `;
 
         const result = await pool.query(query, [userId]);
@@ -122,41 +133,37 @@ exports.checkbooking = async (req, res) => {
     }
 };
 
+// ==========================================
+// 3. แก้ไขข้อมูลการจอง (editBooking)
+// ==========================================
 exports.editBooking = async (req, res) => {
   const client = await pool.connect();
-  const { id } = req.params; // ID ของการจอง (Booking ID)
-  const {
-    startDate,
-    endDate,
-    status,
-    roomId,
-    userId
-  } = req.body;
+  const { id } = req.params; // Booking ID
+  const { startDate, endDate, status, roomId, userId } = req.body;
 
   try {
     await client.query("BEGIN");
 
-    // 1. ตรวจสอบว่ามีข้อมูลการจองนี้อยู่จริงหรือไม่
-    const currentBookingRes = await client.query('SELECT * FROM "Booking" WHERE id = $1', [id]);
+    // 1. ตรวจสอบข้อมูลการจองปัจจุบันในระบบ
+    const currentBookingRes = await client.query('SELECT * FROM Bookings WHERE booking_id = $1', [id]);
     if (currentBookingRes.rows.length === 0) {
       client.release();
-      return res.status(404).json({ success: false, message: "ไม่พบข้อมูลการจอง" });
+      return res.status(404).json({ success: false, message: "ไม่พบข้อมูลการจองที่ระบุ" });
     }
     const current = currentBookingRes.rows[0];
 
-    // 2. ถ้ามีการเปลี่ยนวันที่ หรือ เปลี่ยนห้อง ต้องตรวจสอบว่าห้องว่างหรือไม่ (Prevent Overlap)
-    // เงื่อนไข: ไม่นับรวม ID การจองของตัวเอง
-    if (startDate || endDate || roomId) {
-      const targetRoomId = roomId || current.roomId;
-      const targetStart = startDate || current.startDate;
-      const targetEnd = endDate || current.endDate;
+    const targetRoomId = roomId || current.room_id;
+    const targetStart = startDate || current.check_in_date;
+    const targetEnd = endDate || current.check_out_date;
 
+    // 2. ตรวจสอบเงื่อนไขทับซ้อนช่วงเวลา (Overlap) กรณีขยับวันหรือเปลี่ยนห้องพัก
+    if (startDate || endDate || roomId) {
       const overlapQuery = `
-        SELECT id FROM "Booking"
-        WHERE "roomId" = $1 
-        AND id != $2
-        AND status != 'CANCELLED'
-        AND ("startDate" < $4 AND "endDate" > $3)
+        SELECT booking_id FROM Bookings
+        WHERE room_id = $1 
+        AND booking_id != $2
+        AND booking_status NOT IN ('ยกเลิก', 'ย้ายออกแล้ว')
+        AND (check_in_date < $4 AND check_out_date > $3)
       `;
       const overlapCheck = await client.query(overlapQuery, [targetRoomId, id, targetStart, targetEnd]);
 
@@ -164,52 +171,57 @@ exports.editBooking = async (req, res) => {
         await client.query("ROLLBACK");
         return res.status(400).json({ 
           success: false, 
-          message: "ไม่สามารถเปลี่ยนวันหรือห้องได้ เนื่องจากมีการจองอื่นทับซ้อนในช่วงเวลาดังกล่าว" 
+          message: "ไม่สามารถเปลี่ยนวันหรือห้องได้ เนื่องจากมีบุ๊คกิ้งอื่นจองไว้แล้ว" 
         });
       }
     }
 
-    // 3. คำนวณราคาใหม่ (Optional: กรณีเปลี่ยนวันที่/ห้อง แล้วต้องการอัปเดตราคาอัตโนมัติ)
-    let newTotalPrice = current.totalPrice;
-    if (startDate || endDate || roomId) {
-      const roomRes = await client.query('SELECT "basePricedaily" FROM "Room" WHERE id = $1', [roomId || current.roomId]);
-      const pricePerDay = roomRes.rows[0].basePricedaily;
-      
-      const start = new Date(startDate || current.startDate);
-      const end = new Date(endDate || current.endDate);
-      const diffTime = Math.abs(end - start);
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-      newTotalPrice = diffDays * pricePerDay;
-    }
+    // 3. คำนวณราคาห้องพักใหม่ให้เหมาะสมกับจำนวนวันและประเภทห้องที่เปลี่ยน
+    const roomRes = await client.query(
+        'SELECT rt.room_price FROM Rooms r JOIN Room_Types rt ON r.room_type_id = rt.room_type_id WHERE r.room_id = $1', 
+        [targetRoomId]
+    );
+    const pricePerDay = roomRes.rows[0].room_price;
+    
+    const start = new Date(targetStart);
+    const end = new Date(targetEnd);
+    const diffTime = Math.abs(end - start);
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1;
+    const newTotalPrice = diffDays * pricePerDay;
 
-    // 4. อัปเดตข้อมูลการจอง
+    // 4. สั่ง Update ข้อมูลเข้าฐานข้อมูล PostgreSQL
     const updateQuery = `
-      UPDATE "Booking" SET
-        "roomId" = $1,
-        "userId" = $2,
-        "startDate" = $3,
-        "endDate" = $4,
-        "totalPrice" = $5,
-        "status" = $6,
-        "updatedAt" = NOW()
-      WHERE id = $7
+      UPDATE Bookings SET
+        room_id = $1,
+        member_id = $2,
+        check_in_date = $3,
+        check_out_date = $4,
+        booking_status = $5
+      WHERE booking_id = $6
     `;
 
     await client.query(updateQuery, [
-      roomId || current.roomId,
-      userId || current.userId,
-      startDate || current.startDate,
-      endDate || current.endDate,
-      newTotalPrice,
-      status || current.status,
+      targetRoomId,
+      userId || current.member_id,
+      targetStart,
+      targetEnd,
+      status || current.booking_status,
       id
     ]);
+
+    // 5. ปรับปรุงสถานะห้องพักตามสถานะการจอง (เช่น หากกดยกเลิก ให้เปลี่ยนสถานะห้องกลับมาเป็น 'ว่าง')
+    const finalStatus = status || current.booking_status;
+    if (finalStatus === 'ยกเลิก' || finalStatus === 'ย้ายออกแล้ว') {
+        await client.query(`UPDATE Rooms SET room_status = 'ว่าง' WHERE room_id = $1`, [targetRoomId]);
+    } else if (finalStatus === 'กำลังเข้าพัก' || finalStatus === 'ยืนยันการจอง') {
+        await client.query(`UPDATE Rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`, [targetRoomId]);
+    }
 
     await client.query("COMMIT");
     res.status(200).json({
       success: true,
-      message: "แก้ไขข้อมูลการจองเรียบร้อยแล้ว",
-      newTotalPrice: newTotalPrice
+      message: "แก้ไขข้อมูลการจองและอัปเดตสถานะห้องพักเรียบร้อยแล้ว",
+      calculatedTotalPrice: newTotalPrice
     });
 
   } catch (error) {

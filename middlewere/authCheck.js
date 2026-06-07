@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
-const pool = require("../config/db"); // เปลี่ยนไปใช้ pool จาก db.js
+const pool = require("../config/db"); 
 
+// --- 1. ตรวจสอบ Token และการมีตัวตนของผู้ใช้ ---
 exports.authCheck = async (req, res, next) => {
   try {
     const headerToken = req.headers.authorization;
@@ -10,65 +11,64 @@ exports.authCheck = async (req, res, next) => {
     const token = headerToken.split(" ")[1];
 
     // ตรวจสอบความถูกต้องของ Token
-    const decode = jwt.verify(token, process.env.SECRET);
-    req.user = decode;
+    const decode = jwt.verify(token, process.env.SECRET || "your_secret_key");
+    req.user = decode; // ในนี้จะมี id, username, role ตามที่ตั้งไว้ใน login controller
 
-    // ตรวจสอบในฐานข้อมูลว่า User นี้ยังอยู่และถูกเปิดใช้งาน (enabled) ไหม
+    // ตรวจสอบในฐานข้อมูลว่าสมาชิกคนนี้ยังมีตัวตนอยู่จริงไหม
     const result = await pool.query(
-      'SELECT enabled FROM users WHERE email = $1 LIMIT 1',
-      [req.user.email]
+      'SELECT member_id, user_role FROM Members WHERE username = $1 LIMIT 1',
+      [req.user.username]
     );
     const user = result.rows[0];
 
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
-
-    if (!user.enabled) {
-      return res.status(400).json({ message: "This account cannot access" });
-    }
     
     next();
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "Token Invalid" });
+    res.status(401).json({ message: "Token Invalid" });
   }
 };
 
-exports.subCheck = async (req, res, next) => {
+// --- 2. ตรวจสอบว่าเป็นกลุ่ม "ผู้เช่า" หรือไม่ (Tenant Check) ---
+exports.tenantCheck = async (req, res, next) => {
   try {
-    const { email } = req.user;
+    const { username } = req.user;
     
-    // ดึงค่า role มาเช็คว่าเป็น SUBSCRIPTION หรือไม่
+    // ดึงค่า user_role มาตรวจสอบ
     const result = await pool.query(
-      'SELECT role FROM users WHERE email = $1 LIMIT 1',
-      [email]
+      'SELECT user_role FROM Members WHERE username = $1 LIMIT 1',
+      [username]
     );
     const user = result.rows[0];
     
-    if (!user || user.role.trim() !== "SUBSCRIPTION") {
-       return res.status(403).json({ message: "Access Denied : SUBSCRIPTION Invalid" });
+    // ตรวจสอบว่าเป็นผู้เช่ารายเดือน หรือ รายวัน (ถ้าใช่ไฟเขียวผ่านได้)
+    if (!user || (user.user_role !== "Monthly_Tenant" && user.user_role !== "Daily_Tenant")) {
+       return res.status(403).json({ message: "Access Denied: Tenant Account Only" });
     }
     next();
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "Error SUBSCRIPTION access denied" });
+    res.status(500).json({ message: "Error Tenant access denied" });
   }
 };
 
+// --- 3. ตรวจสอบว่าเป็นผู้ดูแลระบบหรือไม่ (Admin Check) ---
 exports.adminCheck = async (req, res, next) => {
   try {
-    const { email } = req.user;
+    const { username } = req.user;
     
-    // ดึงค่า role มาเช็คว่าเป็น ADMIN หรือไม่
+    // ดึงค่า user_role มาเช็คว่าเป็น Admin หรือไม่
     const result = await pool.query(
-      'SELECT role FROM users WHERE email = $1 LIMIT 1',
-      [email]
+      'SELECT user_role FROM Members WHERE username = $1 LIMIT 1',
+      [username]
     );
     const user = result.rows[0];
     
-    if (!user || user.role.trim() !== "ADMIN") {
-       return res.status(403).json({ message: "Access Denied : Admin Invalid" });
+    if (!user || user.user_role !== "Admin") {
+       return res.status(403).json({ message: "Access Denied: Admin Only" });
     }
     next();
   } catch (err) {

@@ -1,113 +1,69 @@
-const pool = require("../config/db"); // เปลี่ยนไปใช้ pool จากไฟล์ db.js ที่เราสร้างใหม่
+const pool = require("../config/db");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
+// ==========================================
+// 1. สร้างห้องพักใหม่ (createRoom)
+// ==========================================
 exports.createRoom = async (req, res) => {
-  // 1. จอง Client จาก Pool เพื่อทำ Transaction
-  const client = await pool.connect();
-
-  // ดึงข้อมูลจาก Body (Destructuring)
   const {
     number,
-    type,
-    floor,
-    basePrice, // ราคาพื้นฐาน (รายวัน)
-    basePriceMonthly, // ราคาเหมา (รายเดือน)
-    description,
+    room_type_id, // ส่ง ID ของประเภทห้องพักมาจากหน้าบ้าน (เชื่อมกับตาราง Room_Types)
+    room_status   // กำหนดค่าเริ่มต้นได้ เช่น 'ว่าง', 'ปิดปรับปรุง'
   } = req.body;
 
+  if (!number || !room_type_id) {
+    return res.status(400).json({ success: false, message: "กรุณาระบุหมายเลขห้องและรหัสประเภทห้อง" });
+  }
+
   try {
-    // 2. เริ่มต้น Transaction
-    await client.query("BEGIN");
-
-    // 3. เพิ่มข้อมูลลงตาราง Room
-    // อ้างอิงโครงสร้าง: id, number, type, floor, basePricedalliy, status, basePriceMonly, description
+    // โครงสร้างใหม่บันทึกจบในตารางเดียว ไม่ต้องทำมัลติทรานแซกชันให้ยุ่งยาก
     const roomQuery = `
-            INSERT INTO "Room" (
-                "number", 
-                "type", 
-                "floor", 
-                "basePricedaily", 
-                "status", 
-                "basePriceMonthly", 
-                "description", 
-                "createdAt", 
-                "updatedAt"
-            ) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW()) 
-            RETURNING id;
-        `;
+        INSERT INTO Rooms (room_number, room_type_id, room_status) 
+        VALUES ($1, $2, $3) 
+        RETURNING room_id;
+    `;
 
-    const roomRes = await client.query(roomQuery, [
+    const roomRes = await pool.query(roomQuery, [
       number,
-      type,
-      floor,
-      basePrice,
-      true, // status: true (เปิดใช้งาน)
-      basePriceMonthly,
-      description,
+      room_type_id,
+      room_status || 'ว่าง'
     ]);
-
-    const newRoomId = roomRes.rows[0].id;
-
-    // 4. เพิ่มข้อมูลลงตาราง RoomMonthly (เพื่อใช้เช็คสถานะว่างรายเดือน)
-    const monthlyQuery = `
-            INSERT INTO "RoomMonthly" (
-                "roomId", 
-                "price", 
-                "isBooked"
-            ) 
-            VALUES ($1, $2, $3, $4, $5);
-        `;
-
-    await client.query(monthlyQuery, [
-      newRoomId,
-      basePriceMonthly,
-      false, // isBooked: false (ว่างพร้อมจอง)
-    ]);
-
-    // 5. หากสำเร็จทั้งหมดให้ Commit
-    await client.query("COMMIT");
 
     res.status(201).json({
       success: true,
-      message: "สร้างห้องพักและข้อมูลรายเดือนสำเร็จ",
-      roomId: newRoomId,
+      message: "สร้างห้องพักสำเร็จ",
+      roomId: roomRes.rows[0].room_id,
     });
   } catch (error) {
-    // 6. หากพังจุดใดจุดหนึ่ง ให้ Rollback (ข้อมูลจะไม่ถูกบันทึกเลย)ๆ
-    await client.query("ROLLBACK");
-    console.error("Error in addRoom Transaction:", error);
-
+    console.error("Error in createRoom:", error);
     res.status(500).json({
       success: false,
-      message: "ไม่สามารถเพิ่มข้อมูลได้",
+      message: "ไม่สามารถเพิ่มข้อมูลห้องพักได้",
       error: error.message,
     });
-  } finally {
-    // 7. คืน Client กลับเข้า Pool (สำคัญมาก!)
-    client.release();
   }
 };
 
+// ==========================================
+// 2. ดึงรายการห้องพักทั้งหมด (getRooms)
+// ==========================================
 exports.getRooms = async (req, res) => {
   try {
+    // ดึงข้อมูลห้องพักพร้อม Join รายละเอียดราคาและชื่อประเภทห้องมาจากตาราง Room_Types
     const query = `
-            SELECT 
-                r.id, 
-                r.number, 
-                r.type, 
-                r.floor, 
-                r."basePricedaily", 
-                r."basePriceMonthly",
-                r.description,
-                rm."isBooked" as "isMonthlyBooked", -- สถานะรายเดือน
-                rm.price as "currentMonthPrice"
-            FROM "Room" r
-            LEFT JOIN "RoomMonthly" rm ON r.id = rm."roomId" 
-            WHERE r.status = true -- เฉพาะห้องที่พร้อมเปิดใช้งาน
-            ORDER BY r.floor ASC, r.number ASC;
-        `;
+        SELECT 
+            r.room_id AS "id", 
+            r.room_number AS "number", 
+            r.room_status AS "status",
+            rt.room_type_id AS "roomTypeId",
+            rt.type_name AS "typeName", 
+            rt.room_price AS "price"
+        FROM Rooms r
+        JOIN Room_Types rt ON r.room_type_id = rt.room_type_id
+        WHERE r.room_status != 'ปิดปรับปรุง'
+        ORDER BY r.room_number ASC;
+    `;
 
     const { rows } = await pool.query(query);
 
@@ -126,94 +82,55 @@ exports.getRooms = async (req, res) => {
   }
 };
 
+// ==========================================
+// 3. แก้ไขข้อมูลห้องพัก (editRoom)
+// ==========================================
 exports.editRoom = async (req, res) => {
-  const client = await pool.connect();
-  const { id } = req.params; 
-  const {
-    number,
-    type,
-    floor,
-    basePrice,         // คือ basePricedaily ใน DB
-    basePriceMonthly,  // คือ basePriceMonthly ใน DB
-    status,
-    description,
-    isMonthlyBooked    // สถานะจาก RoomMonthly
-  } = req.body;
+  const { id } = req.params; // room_id
+  const { number, room_type_id, status } = req.body;
 
   try {
-    await client.query("BEGIN");
-
-    // 1. ตรวจสอบข้อมูลเดิม
-    const currentRes = await client.query('SELECT * FROM "Room" WHERE id = $1', [id]);
+    // 1. ตรวจสอบข้อมูลเดิมในระบบ
+    const currentRes = await pool.query('SELECT * FROM Rooms WHERE room_id = $1', [id]);
     if (currentRes.rows.length === 0) {
-      client.release();
       return res.status(404).json({ success: false, message: "ไม่พบห้องพักที่ต้องการแก้ไข" });
     }
     const current = currentRes.rows[0];
 
-    // 2. อัปเดตตาราง Room (ใช้ชื่อฟิลด์ตาม Schema เป๊ะๆ)
+    // 2. อัปเดตข้อมูลเข้าตาราง Rooms โดยใช้ค่าเก่าหากหน้าบ้านไม่ได้ส่งค่าใหม่มา
     const roomUpdateQuery = `
-      UPDATE "Room" SET 
-        "number" = $1, 
-        "type" = $2, 
-        "floor" = $3,
-        "basePricedaily" = $4, 
-        "status" = $5, 
-        "basePriceMonthly" = $6, 
-        "description" = $7, 
-        "updatedAt" = NOW()
-      WHERE id = $8
+      UPDATE Rooms SET 
+        room_number = $1, 
+        room_type_id = $2, 
+        room_status = $3
+      WHERE room_id = $4
     `;
 
-    await client.query(roomUpdateQuery, [
-      number !== undefined ? number : current.number,
-      type !== undefined ? type : current.type,
-      floor !== undefined ? parseInt(floor) : current.floor,
-      basePrice !== undefined ? basePrice : current.basePricedaily,
-      status !== undefined ? status : current.status,
-      basePriceMonthly !== undefined ? basePriceMonthly : current.basePriceMonthly,
-      description !== undefined ? description : current.description,
+    await pool.query(roomUpdateQuery, [
+      number !== undefined ? number : current.room_number,
+      room_type_id !== undefined ? room_type_id : current.room_type_id,
+      status !== undefined ? status : current.room_status,
       id
     ]);
-
-    // 3. อัปเดตตาราง RoomMonthly (เพื่อเปลี่ยนสถานะ ว่าง/ไม่ว่าง และราคาปัจจุบัน)
-    // เนื่องจาก Schema RoomMonthly ของคุณไม่มี month/year เราจะอัปเดตผ่าน roomId โดยตรง
-    const monthlyUpdateQuery = `
-      UPDATE "RoomMonthly" 
-      SET "price" = $1, "isBooked" = $2
-      WHERE "roomId" = $3
-    `;
-    
-    // ใช้ราคาใหม่ถ้าส่งมา ถ้าไม่ส่งใช้ราคาเดิมของห้อง
-    const finalMonthlyPrice = basePriceMonthly !== undefined ? basePriceMonthly : current.basePriceMonthly;
-    
-    await client.query(monthlyUpdateQuery, [
-      finalMonthlyPrice,
-      isMonthlyBooked !== undefined ? isMonthlyBooked : false, // ถ้าไม่ส่งมาให้ default เป็น false
-      id
-    ]);
-
-    await client.query("COMMIT");
 
     res.status(200).json({
       success: true,
-      message: "แก้ไขข้อมูลห้องพักและสถานะรายเดือนสำเร็จ",
+      message: "แก้ไขข้อมูลห้องพักเสร็จสิ้น",
     });
   } catch (error) {
-    await client.query("ROLLBACK");
     console.error("Error in editRoom:", error);
     res.status(500).json({
       success: false,
       message: "เกิดข้อผิดพลาดในการแก้ไขข้อมูล",
       error: error.message,
     });
-  } finally {
-    client.release();
   }
 };
 
+// ==========================================
+// 4. ค้นหาห้องว่างตามช่วงเวลาเช็คอิน-เช็คเอาท์ (searchRooms)
+// ==========================================
 exports.searchRooms = async (req, res) => {
-  // รองรับทั้งการส่งผ่าน Body (POST) หรือ Query (GET)
   const checkIn = req.body.checkIn || req.query.checkIn;
   const checkOut = req.body.checkOut || req.query.checkOut;
 
@@ -226,28 +143,22 @@ exports.searchRooms = async (req, res) => {
 
   const sql = `
     SELECT 
-        r.id, 
-        r.number, 
-        r.type, 
-        r.floor, 
-        r."basePricedaily", 
-        r."basePriceMonthly",
-        rm.price AS monthly_price_current,
-        rm."isBooked" AS monthly_booked_status
-    FROM "Room" r
-    INNER JOIN "RoomMonthly" rm ON r.id = rm."roomId"
-    WHERE rm."isBooked" = false -- เงื่อนไข 1: ไม่มีการเช่ารายเดือนอยู่
-    AND r.status = true        -- เงื่อนไขเพิ่มเติม: ห้องต้องพร้อมใช้งาน (status ในตาราง Room)
-    AND r.id NOT IN (
-        -- เงื่อนไข 2: ไม่อยู่ในช่วงที่มีคนจอง (Booking)
-        SELECT "roomId" 
-        FROM "Booking"
-        WHERE status != 'CANCELLED' 
-        AND (
-            ("startDate" < $2 AND "endDate" > $1) -- สูตรตรวจสอบการทับซ้อนของวันที่
-        )
+        r.room_id AS "id", 
+        r.room_number AS "number", 
+        r.room_status AS "status",
+        rt.type_name AS "roomType", 
+        rt.room_price AS "price"
+    FROM Rooms r
+    JOIN Room_Types rt ON r.room_type_id = rt.room_type_id
+    WHERE r.room_status = 'ว่าง'  -- ค้นหาเฉพาะห้องที่ไม่ได้ติดเคสผู้เช่ารายเดือนอยู่ ณ ปัจจุบัน
+    AND r.room_id NOT IN (
+        -- กรองห้องที่ถูกจับจองไปแล้วในช่วงเวลานั้น ๆ ออกไป
+        SELECT room_id 
+        FROM Bookings
+        WHERE booking_status NOT IN ('ยกเลิก', 'ย้ายออกแล้ว') 
+        AND ($2 < check_out_date AND $1 > check_in_date)
     )
-    ORDER BY r.floor ASC, r.number ASC;
+    ORDER BY r.room_number ASC;
   `;
 
   try {
@@ -262,66 +173,49 @@ exports.searchRooms = async (req, res) => {
     console.error('Search Rooms Error:', err.message);
     res.status(500).json({ 
       success: false,
-      error: "เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล" 
+      error: "เกิดข้อผิดพลาดในการค้นหาข้อมูลห้องพักว่าง" 
     });
   }
 };
 
+// ==========================================
+// 5. ลบห้องพัก (deleteRoom)
+// ==========================================
 exports.deleteRoom = async (req, res) => {
-  // 1. จอง Client จาก Pool เพื่อทำ Transaction
-  const client = await pool.connect();
-  const { id } = req.params; // รับ ID ห้องจาก URL params
+  const { id } = req.params; // room_id
 
   try {
-    // 2. เริ่มต้น Transaction
-    await client.query("BEGIN");
-
-    // 3. ตรวจสอบก่อนว่าห้องนี้มีการจอง (Booking) ค้างอยู่หรือไม่ 
-    // (ถ้ามีคนจองอยู่ ไม่ควรให้ลบ หรือควรให้ยกเลิกการจองก่อน)
-    const checkBookingQuery = `SELECT id FROM "Booking" WHERE "roomId" = $1 AND status != 'CANCELLED' LIMIT 1`;
-    const bookingCheck = await client.query(checkBookingQuery, [id]);
+    // ตรวจสอบความปลอดภัย: เช็คว่าห้องพักนี้เคยมีประวัติการจองอยู่ในระบบหรือไม่
+    const checkBookingQuery = `SELECT booking_id FROM Bookings WHERE room_id = $1 AND booking_status NOT IN ('ยกเลิก', 'ย้ายออกแล้ว') LIMIT 1`;
+    const bookingCheck = await pool.query(checkBookingQuery, [id]);
 
     if (bookingCheck.rows.length > 0) {
-      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
-        message: "ไม่สามารถลบห้องพักได้ เนื่องจากมีการจองค้างอยู่ในระบบ",
+        message: "ไม่สามารถลบห้องพักได้ เนื่องจากห้องพักนี้มีคิวจองที่กำลังใช้งานอยู่",
       });
     }
 
-    // 4. ลบข้อมูลในตาราง RoomMonthly (Child Table)
-    await client.query('DELETE FROM "RoomMonthly" WHERE "roomId" = $1', [id]);
-
-    // 5. ลบข้อมูลในตาราง Room (Parent Table)
-    const deleteRes = await client.query('DELETE FROM "Room" WHERE id = $1', [id]);
+    // หากเคลียร์คิวหมดแล้ว สามารถลบออกจากตารางหลักได้ทันที
+    const deleteRes = await pool.query('DELETE FROM Rooms WHERE room_id = $1', [id]);
 
     if (deleteRes.rowCount === 0) {
-      await client.query("ROLLBACK");
       return res.status(404).json({
         success: false,
-        message: "ไม่พบห้องพักที่ต้องการลบ",
+        message: "ไม่พบห้องพักที่ต้องการลบในระบบ",
       });
     }
-
-    // 6. หากสำเร็จทั้งหมดให้ Commit
-    await client.query("COMMIT");
 
     res.status(200).json({
       success: true,
-      message: "ลบข้อมูลห้องพักและข้อมูลที่เกี่ยวข้องสำเร็จ",
+      message: "ลบข้อมูลห้องพักออกจากระบบสำเร็จ",
     });
   } catch (error) {
-    // 7. หากเกิดข้อผิดพลาด ให้ Rollback
-    await client.query("ROLLBACK");
-    console.error("Error in deleteRoom Transaction:", error);
-
+    console.error("Error in deleteRoom:", error);
     res.status(500).json({
       success: false,
-      message: "เกิดข้อผิดพลาดในการลบข้อมูล",
+      message: "เกิดข้อผิดพลาดด้านระบบในการลบข้อมูล",
       error: error.message,
     });
-  } finally {
-    // 8. คืน Client กลับเข้า Pool
-    client.release();
   }
 };
