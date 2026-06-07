@@ -5,7 +5,7 @@ const router = express.Router()
 const { createBooking, checkbooking, editBooking } = require('../controllers/booking') 
 
 // 2. นำเข้า Middleware ตรวจสอบสิทธิ์ (ปรับพาร์ทและชื่อฟังก์ชันให้ตรงกับตัวปัจจุบัน)
-const { authCheck, tenantCheck } = require('../middlewares/auth')
+const { authCheck, tenantCheck } = require('../middleweres/authCheck')
 
 // --- เส้นทางจัดการการจองห้องพัก (ล็อกสิทธิ์ด้วย Middleware) ---
 

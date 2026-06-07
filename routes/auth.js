@@ -5,7 +5,7 @@ const router = express.Router();
 const { register, login, currentUser } = require('../controllers/auth');
 
 // 2. นำเข้า Middleware ตรวจสอบสิทธิ์ (ปรับพาร์ทไฟล์ให้ตรงกับโฟลเดอร์ปัจจุบัน)
-const { authCheck, tenantCheck, adminCheck } = require('../middlewares/auth');
+const { authCheck, tenantCheck, adminCheck } = require('../middleweres/authCheck');
 
 // --- หน้าบ้านเข้าถึงได้ทั่วไป (Public) ---
 router.post('/register', register);

@@ -6,7 +6,7 @@ const { register, login, currentUser } = require('../controllers/auth')
 const { createBooking, checkbooking } = require('../controllers/booking') 
 
 // 2. นำเข้า Middleware ตรวจสอบสิทธิ์ (ปรับพาร์ทและสิทธิ์ Tenant สำหรับระบบหอพัก)
-const { authCheck, tenantCheck } = require('../middlewares/auth')
+const { authCheck, tenantCheck } = require('../middleweres/authCheck')
 
 // --- ROUTES: ระบบสมาชิกและการยืนยันตัวตน (Auth) ---
 router.post('/register', register)

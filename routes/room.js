@@ -5,7 +5,7 @@ const router = express.Router()
 const { createRoom, getRooms, searchRooms, deleteRoom, editRoom } = require('../controllers/room') 
 
 // 2. นำเข้า Middleware ตรวจสอบสิทธิ์ (ปรับพาร์ทและชื่อฟังก์ชันให้ตรงตามที่เราแก้ไขไว้)
-const { authCheck, adminCheck } = require('../middlewares/auth')
+const { authCheck, adminCheck } = require('../middleweres/authCheck')
 
 // --- เส้นทางสำหรับผู้ใช้งานทั่วไป / หน้าบ้าน (Public or Users) ---
 
