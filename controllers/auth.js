@@ -26,12 +26,12 @@ exports.register = async (req, res) => {
     const hashPassword = await bcrypt.hash(password, 10);
 
     // 3. กำหนด Role (ถ้าไม่มีการส่งมา ให้ default เป็นผู้เช่ารายเดือน)
-    const  user_role = 'Daily_Tenant';
+    const finalRole = user_role || 'Daily_Tenant';
 
     // 4. บันทึกข้อมูลลงฐานข้อมูลตาราง Members
     await pool.query(
       'INSERT INTO Members (username, password, full_name, phone_number, user_role) VALUES ($1, $2, $3, $4, $5)',
-      [username, hashPassword, full_name, phone_number || null, user_role]
+      [username, hashPassword, full_name, phone_number || null, finalRole]
     );
 
     res.status(201).send("Register Success");
