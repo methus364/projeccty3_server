@@ -30,8 +30,8 @@ exports.register = async (req, res) => {
 
     // 4. บันทึกข้อมูลลงฐานข้อมูลตาราง Members
     await pool.query(
-      'INSERT INTO Members (username, password, full_name, phone_number, citizen_id, user_role) VALUES ($1, $2, $3, $4, $5, $6)',
-      [username, hashPassword, full_name, phone_number || null, citizen_id || null, finalRole]
+      'INSERT INTO Members (username, password, full_name, phone_number, user_role) VALUES ($1, $2, $3, $4, $5)',
+      [username, hashPassword, full_name, phone_number || null, finalRole]
     );
 
     res.status(201).send("Register Success");
