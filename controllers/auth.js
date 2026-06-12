@@ -5,7 +5,7 @@ const jwt = require("jsonwebtoken");
 // --- Register (สมัครสมาชิก) ---
 exports.register = async (req, res) => {
   try {
-    const { username, password, full_name, phone_number, citizen_id, user_role } = req.body;
+    const { username, password, full_name, phone_number, user_role } = req.body;
     
     // Validation เบื้องต้น
     if (!username) return res.status(400).json({ message: "Username is required!" });
@@ -26,7 +26,7 @@ exports.register = async (req, res) => {
     const hashPassword = await bcrypt.hash(password, 10);
 
     // 3. กำหนด Role (ถ้าไม่มีการส่งมา ให้ default เป็นผู้เช่ารายเดือน)
-    const finalRole = user_role || 'Monthly_Tenant';
+    const finalRole = user_role || 'Daily_Tenant';
 
     // 4. บันทึกข้อมูลลงฐานข้อมูลตาราง Members
     await pool.query(
