@@ -88,20 +88,110 @@ exports.login = async (req, res) => {
 // --- Current User (ดึงข้อมูลผู้ใช้ปัจจุบันจาก Token) ---
 exports.currentUser = async (req, res) => {
   try {
-    // ดึงข้อมูลผ่าน req.user.username (ดึงมาจาก Middleware ถอดรหัส Token)
     const result = await pool.query(
-      'SELECT member_id, username, full_name, user_role FROM Members WHERE username = $1 LIMIT 1',
+      'SELECT member_id, username, full_name, email, phone_number, user_role FROM members WHERE username = $1 LIMIT 1',
       [req.user.username]
     );
     const user = result.rows[0];
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    res.json({ user });
+    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    res.json({ success: true, data: user });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Server Error" });
+    res.status(500).json({ success: false, message: "Server Error" });
+  }
+};
+
+// --- Get All Members (Admin) ---
+exports.getMembers = async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT member_id, username, full_name, email, phone_number, user_role FROM members ORDER BY member_id ASC'
+    );
+    res.json({ success: true, count: rows.length, data: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+// --- Get Member By ID (Admin) ---
+exports.getMemberById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rows } = await pool.query(
+      'SELECT member_id, username, full_name, email, phone_number, user_role FROM members WHERE member_id = $1 LIMIT 1',
+      [id]
+    );
+    if (!rows[0]) return res.status(404).json({ success: false, message: "ไม่พบสมาชิก" });
+    res.json({ success: true, data: rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+// --- Update Member (Admin) ---
+exports.updateMember = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { full_name, email, phone_number, user_role } = req.body;
+
+    const cur = await pool.query('SELECT * FROM members WHERE member_id = $1 LIMIT 1', [id]);
+    if (!cur.rows[0]) return res.status(404).json({ success: false, message: "ไม่พบสมาชิก" });
+    const c = cur.rows[0];
+
+    await pool.query(
+      `UPDATE members SET full_name=$1, email=$2, phone_number=$3, user_role=$4 WHERE member_id=$5`,
+      [
+        full_name    !== undefined ? full_name    : c.full_name,
+        email        !== undefined ? email        : c.email,
+        phone_number !== undefined ? phone_number : c.phone_number,
+        user_role    !== undefined ? user_role    : c.user_role,
+        id,
+      ]
+    );
+    res.json({ success: true, message: "อัปเดตข้อมูลสมาชิกเรียบร้อย" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+// --- Delete Member (Admin) ---
+exports.deleteMember = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query('DELETE FROM members WHERE member_id = $1', [id]);
+    if (result.rowCount === 0) return res.status(404).json({ success: false, message: "ไม่พบสมาชิก" });
+    res.json({ success: true, message: "ลบสมาชิกเรียบร้อย" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+// --- Update Own Profile (Tenant/Admin) ---
+exports.updateProfile = async (req, res) => {
+  try {
+    const id = req.user.id;
+    const { full_name, email, phone_number } = req.body;
+
+    const cur = await pool.query('SELECT * FROM members WHERE member_id = $1 LIMIT 1', [id]);
+    if (!cur.rows[0]) return res.status(404).json({ success: false, message: "ไม่พบสมาชิก" });
+    const c = cur.rows[0];
+
+    await pool.query(
+      `UPDATE members SET full_name=$1, email=$2, phone_number=$3 WHERE member_id=$4`,
+      [
+        full_name    !== undefined ? full_name    : c.full_name,
+        email        !== undefined ? email        : c.email,
+        phone_number !== undefined ? phone_number : c.phone_number,
+        id,
+      ]
+    );
+    res.json({ success: true, message: "อัปเดตโปรไฟล์เรียบร้อย" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 };

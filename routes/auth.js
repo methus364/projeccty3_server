@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 // 1. นำเข้า Controllers
-const { register, login, currentUser } = require('../controllers/auth');
+const { register, login, currentUser, getMembers, getMemberById, updateMember, deleteMember, updateProfile } = require('../controllers/auth');
 
 // 2. นำเข้า Middleware ตรวจสอบสิทธิ์ (ปรับพาร์ทไฟล์ให้ตรงกับโฟลเดอร์ปัจจุบัน)
 const { authCheck, tenantCheck, adminCheck } = require('../middleweres/authCheck');
@@ -17,5 +17,14 @@ router.get('/current-user', authCheck, tenantCheck, currentUser);
 
 // ตรวจสอบสถานะผู้ดูแลระบบ (Admin)
 router.get('/current-admin', authCheck, adminCheck, currentUser);
+
+// --- Member Management (Admin) ---
+router.get('/members', authCheck, adminCheck, getMembers);
+router.get('/member/:id', authCheck, adminCheck, getMemberById);
+router.put('/members/:id', authCheck, adminCheck, updateMember);
+router.delete('/members/:id', authCheck, adminCheck, deleteMember);
+
+// --- Own Profile (any logged-in user) ---
+router.put('/profile', authCheck, updateProfile);
 
 module.exports = router;
