@@ -365,10 +365,18 @@ exports.checkIn = async (req, res) => {
             const dueDate = new Date(checkInDate.getTime() + 7 * 86400000).toISOString().split('T')[0];
             const roomCost = booking.price_monthly || 0;
 
-            await client.query(
+            const invoiceRes = await client.query(
                 `INSERT INTO invoices (booking_id, invoice_date, due_date, room_cost, water_cost, elec_cost, total_amount, invoice_status)
-                 VALUES ($1, $2, $3, $4, 0, 0, $4, 'ยังไม่ชำระ')`,
+                 VALUES ($1, $2, $3, $4, 0, 0, $4, 'ยังไม่ชำระ')
+                 RETURNING invoice_id`,
                 [id, today, dueDate, roomCost]
+            );
+
+            // ใส่รายการย่อยค่าห้องรอบแรก (น้ำ/ไฟ ออกบิลรอบถัดไปผ่านโมดูล M6)
+            await client.query(
+                `INSERT INTO invoice_details (invoice_id, item_name, quantity, unit_price, subtotal)
+                 VALUES ($1, 'ค่าห้อง (รายเดือน)', 1, $2, $2)`,
+                [invoiceRes.rows[0].invoice_id, roomCost]
             );
         }
 

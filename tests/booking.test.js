@@ -120,6 +120,7 @@ function scenarioCheckIn(bk) {
     const s = sql.trim();
     if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) return { rows: [] };
     if (has(s, 'FROM bookings b') && has(s, 'JOIN rooms r')) return { rows: bk ? [bk] : [] };
+    if (s.startsWith('INSERT INTO invoices')) return { rows: [{ invoice_id: 50 }] }; // RETURNING invoice_id
     return { rows: [] };
   });
 }

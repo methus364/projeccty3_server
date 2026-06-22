@@ -6,8 +6,11 @@
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
+    "nodemailer": "^9.0.1",
     "nodemon": "^3.1.11",
-    "pg": "^8.17.2"
+    "pdfmake": "^0.2.20",
+    "pg": "^8.17.2",
+    "thai-baht-text": "^2.0.5"
   },
   "scripts": {
     "start": "node server.js",
