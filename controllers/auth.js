@@ -1,23 +1,22 @@
 const pool = require("../config/db");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const SECRET = require("../config/secret");
 
 // --- Register (สมัครสมาชิก) ---
 exports.register = async (req, res) => {
   try {
-    const { username, password, full_name, phone_number, user_role } = req.body;
-    
-    // Validation เบื้องต้น
+    const { username, password, full_name, email, phone_number, user_role } = req.body;
+
     if (!username) return res.status(400).json({ message: "Username is required!" });
     if (!password) return res.status(400).json({ message: "Password is required!" });
-    if (!full_name) return res.status(400).json({ message: "Full Name is required!" }); 
+    if (!full_name) return res.status(400).json({ message: "Full Name is required!" });
 
-    // 1. ตรวจสอบว่ามี Username ซ้ำในตาราง Members ไหม
+    // 1. ตรวจสอบ username ซ้ำ
     const checkUser = await pool.query(
       'SELECT username FROM Members WHERE username = $1 LIMIT 1',
       [username]
     );
-
     if (checkUser.rows.length > 0) {
       return res.status(400).json({ message: "Username already exists" });
     }
@@ -25,16 +24,16 @@ exports.register = async (req, res) => {
     // 2. Hash Password
     const hashPassword = await bcrypt.hash(password, 10);
 
-    // 3. กำหนด Role (ถ้าไม่มีการส่งมา ให้ default เป็นผู้เช่ารายเดือน)
+    // 3. กำหนด Role
     const finalRole = user_role || 'Daily_Tenant';
 
-    // 4. บันทึกข้อมูลลงฐานข้อมูลตาราง Members
+    // 4. INSERT รวม email
     await pool.query(
-      'INSERT INTO Members (username, password, full_name, phone_number, user_role) VALUES ($1, $2, $3, $4, $5)',
-      [username, hashPassword, full_name, phone_number || null, finalRole]
+      'INSERT INTO Members (username, password, full_name, email, phone_number, user_role) VALUES ($1, $2, $3, $4, $5, $6)',
+      [username, hashPassword, full_name, email || null, phone_number || null, finalRole]
     );
 
-    res.status(201).send("Register Success");
+    res.status(201).json({ success: true, message: "Register Success" });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -73,7 +72,7 @@ exports.login = async (req, res) => {
     };
 
     // 4. สร้าง Token
-    jwt.sign(payload, process.env.SECRET || "your_secret_key", { expiresIn: "1d" }, (err, token) => {
+    jwt.sign(payload, SECRET, { expiresIn: "1d" }, (err, token) => {
       if (err) {
         console.error(err);
         return res.status(500).json({ message: "Server Error jwt" });

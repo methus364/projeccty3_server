@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
-const pool = require("../config/db"); 
+const pool = require("../config/db");
+const SECRET = require("../config/secret");
 
 // --- 1. ตรวจสอบ Token และการมีตัวตนของผู้ใช้ ---
 exports.authCheck = async (req, res, next) => {
@@ -11,7 +12,7 @@ exports.authCheck = async (req, res, next) => {
     const token = headerToken.split(" ")[1];
 
     // ตรวจสอบความถูกต้องของ Token
-    const decode = jwt.verify(token, process.env.SECRET || "your_secret_key");
+    const decode = jwt.verify(token, SECRET);
     req.user = decode; // ในนี้จะมี id, username, role ตามที่ตั้งไว้ใน login controller
 
     // ตรวจสอบในฐานข้อมูลว่าสมาชิกคนนี้ยังมีตัวตนอยู่จริงไหม
@@ -45,7 +46,7 @@ exports.tenantCheck = async (req, res, next) => {
     const user = result.rows[0];
     
     // ตรวจสอบว่าเป็นผู้เช่ารายเดือน หรือ รายวัน (ถ้าใช่ไฟเขียวผ่านได้)
-    if (!user || (user.user_role !== "Monthly_Tenant" && user.user_role !== "Daily_Tenant")) {
+    if (!user || !["Daily_Tenant", "Monthly_Tenant"].includes(user.user_role)) {
        return res.status(403).json({ message: "Access Denied: Tenant Account Only" });
     }
     next();

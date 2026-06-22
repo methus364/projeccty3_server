@@ -1,21 +1,16 @@
 const express = require('express')
 const router = express.Router()
 
-// 1. นำเข้า Controllers
-const { createBooking, checkbooking, editBooking } = require('../controllers/booking') 
+const { createBooking, checkbooking, editBooking, getAllBookings, adminCreateBooking } = require('../controllers/booking')
+const { authCheck, tenantCheck, adminCheck } = require('../middleweres/authCheck')
 
-// 2. นำเข้า Middleware ตรวจสอบสิทธิ์ (ปรับพาร์ทและชื่อฟังก์ชันให้ตรงกับตัวปัจจุบัน)
-const { authCheck, tenantCheck } = require('../middleweres/authCheck')
-
-// --- เส้นทางจัดการการจองห้องพัก (ล็อกสิทธิ์ด้วย Middleware) ---
-
-// 1. สร้างการจองห้องพัก (ต้องเข้าสู่ระบบ และมีสิทธิ์เป็นผู้เช่าเท่านั้น)
+// Tenant routes
 router.post('/booking', authCheck, tenantCheck, createBooking)
-
-// 2. ตรวจสอบประวัติการจองของผู้ใช้ (ต้องเข้าสู่ระบบก่อน)
 router.post('/checkbooking', authCheck, checkbooking)
+router.put('/editBooking/:id', authCheck, editBooking)
 
-// 3. แก้ไขข้อมูลหรือปรับสถานะการจอง (ต้องเข้าสู่ระบบก่อน)
-router.put("/editBooking/:id", authCheck, editBooking)
+// Admin routes
+router.get('/admin/bookings', authCheck, adminCheck, getAllBookings)
+router.post('/admin/booking', authCheck, adminCheck, adminCreateBooking)
 
 module.exports = router
