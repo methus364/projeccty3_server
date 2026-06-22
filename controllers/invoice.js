@@ -269,6 +269,43 @@ exports.getInvoices = async (req, res) => {
 };
 
 // ==========================================
+// 2.5 ดูบิลของตัวเอง (getMyInvoices) — Tenant
+//    GET /my-invoices?status=
+//    คืนเฉพาะบิลของผู้เช่าที่ล็อกอินอยู่ (ผ่าน booking.member_id)
+// ==========================================
+exports.getMyInvoices = async (req, res) => {
+    const { status } = req.query;
+
+    try {
+        // เงื่อนไขหลัก: บิลที่ผูกกับ booking ของ user คนนี้
+        const params = [req.user.id];
+        let where = `WHERE b.member_id = $1`;
+        if (status) {
+            params.push(status);
+            where += ` AND i.invoice_status = $${params.length}`;
+        }
+
+        const result = await pool.query(
+            `SELECT
+                i.invoice_id, i.booking_id, i.invoice_date, i.due_date,
+                i.room_cost, i.water_cost, i.elec_cost, i.total_amount, i.invoice_status,
+                r.room_number
+             FROM invoices i
+             JOIN bookings b ON i.booking_id = b.booking_id
+             JOIN rooms r ON b.room_id = r.room_id
+             ${where}
+             ORDER BY i.invoice_date DESC, i.invoice_id DESC`,
+            params
+        );
+
+        res.json({ success: true, count: result.rows.length, data: result.rows });
+    } catch (error) {
+        console.error("getMyInvoices Error:", error.message);
+        res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการดึงบิลของคุณ" });
+    }
+};
+
+// ==========================================
 // 3. ดูบิลรายตัว (getInvoiceById) — Admin หรือเจ้าของบิล
 //    GET /invoice/:id
 // ==========================================

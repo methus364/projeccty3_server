@@ -4,6 +4,7 @@ const router = express.Router();
 const {
     createInvoice,
     getInvoices,
+    getMyInvoices,
     getInvoiceById,
     getInvoicePdf,
     updateInvoice,
@@ -14,6 +15,9 @@ const { authCheck, adminCheck } = require("../middleweres/authCheck");
 
 // ออกบิลรายเดือนยกชุด (ต้องวางก่อน '/invoice/:id' กัน path ชนกัน)
 router.post("/invoices/generate-monthly", authCheck, adminCheck, generateMonthly);
+
+// Tenant: ดูบิลของตัวเอง
+router.get("/my-invoices", authCheck, getMyInvoices);
 
 // Admin: ออกบิล / ดูรายการบิล
 router.post("/invoice", authCheck, adminCheck, createInvoice);

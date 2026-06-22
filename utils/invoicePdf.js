@@ -39,6 +39,8 @@ function thaiDate(value) {
 // invoice: { invoice_id, invoice_date, due_date, total_amount, invoice_status,
 //            guest_name, room_number, details: [{item_name, quantity, unit_price, subtotal}] }
 // mode: 'invoice' (ใบแจ้งหนี้) หรือ 'receipt' (ใบเสร็จ) — ใช้ template ฐานเดียวกัน
+// โหมด receipt อ่านข้อมูลการชำระเพิ่มจาก: payment_id, payment_method, payment_date (M7)
+//   เลขที่ใบเสร็จอ้างอิง payment_id; ถ้าไม่ส่ง payment_id มาจะใช้ invoice_id แทน
 // คืนค่าเป็น Promise<Buffer>
 // ==========================================
 function buildInvoicePdf(invoice, mode = "invoice") {
@@ -47,8 +49,10 @@ function buildInvoicePdf(invoice, mode = "invoice") {
     // 1. หัวเอกสาร + เลขที่
     const year = new Date(invoice.invoice_date || Date.now()).getFullYear();
     const docTitle = isReceipt ? "ใบเสร็จรับเงิน" : "ใบแจ้งหนี้";
+    // ใบเสร็จใช้เลข payment_id (ถ้ามี), ใบแจ้งหนี้ใช้ invoice_id
+    const receiptRefId = invoice.payment_id || invoice.invoice_id;
     const docNumber = isReceipt
-        ? `REC-${year}-${String(invoice.invoice_id).padStart(4, "0")}`
+        ? `REC-${year}-${String(receiptRefId).padStart(4, "0")}`
         : `INV-${year}-${String(invoice.invoice_id).padStart(4, "0")}`;
 
     // 2. แถวรายการในตาราง (ค่าห้อง/น้ำ/ไฟ)
@@ -80,10 +84,14 @@ function buildInvoicePdf(invoice, mode = "invoice") {
                     {
                         stack: [
                             { text: `เลขที่: ${docNumber}`, alignment: "right" },
-                            { text: `วันที่: ${thaiDate(invoice.invoice_date)}`, alignment: "right" },
+                            {
+                                text: `วันที่: ${thaiDate(isReceipt ? (invoice.payment_date || invoice.invoice_date) : invoice.invoice_date)}`,
+                                alignment: "right",
+                            },
+                            // ใบแจ้งหนี้แสดงวันครบกำหนด · ใบเสร็จแสดงวิธีชำระเงิน
                             !isReceipt
                                 ? { text: `ครบกำหนด: ${thaiDate(invoice.due_date)}`, alignment: "right" }
-                                : {},
+                                : { text: `วิธีชำระ: ${invoice.payment_method || "-"}`, alignment: "right" },
                         ],
                     },
                 ],
@@ -161,7 +169,12 @@ function buildInvoicePdf(invoice, mode = "invoice") {
 
             // ส่วนท้ายเฉพาะใบเสร็จ
             isReceipt
-                ? { text: "ได้รับเงินจำนวนข้างต้นไว้เรียบร้อยแล้ว", margin: [0, 10, 0, 0] }
+                ? {
+                    stack: [
+                        { text: "ได้รับเงินจำนวนข้างต้นไว้เรียบร้อยแล้ว", margin: [0, 10, 0, 0] },
+                        { text: "ผู้รับเงิน: หอพัก Around Loei", margin: [0, 4, 0, 0] },
+                    ],
+                }
                 : { text: "กรุณาชำระเงินภายในวันที่ครบกำหนด ขอบคุณค่ะ", margin: [0, 10, 0, 0] },
         ],
         styles: {
