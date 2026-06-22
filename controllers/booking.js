@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const { _createContractForBooking } = require("./contract");
 
 // ==========================================
 // 1. สร้างการจองห้องพัก (createBooking) — Tenant
@@ -326,10 +327,10 @@ exports.checkIn = async (req, res) => {
     try {
         await client.query("BEGIN");
 
-        // ดึงข้อมูลการจอง + ราคารายเดือนของห้อง
+        // ดึงข้อมูลการจอง + ราคารายเดือน/ค่ามัดจำของห้อง
         const bookingRes = await client.query(
-            `SELECT b.booking_id, b.room_id, b.check_in_date, b.booking_status, b.rent_type,
-                    r.price_monthly
+            `SELECT b.booking_id, b.member_id, b.room_id, b.check_in_date, b.booking_status, b.rent_type,
+                    r.price_monthly, r.deposit_amount
              FROM bookings b
              JOIN rooms r ON b.room_id = r.room_id
              WHERE b.booking_id = $1`,
@@ -357,31 +358,24 @@ exports.checkIn = async (req, res) => {
             [booking.room_id]
         );
 
-        // สำหรับผู้เช่ารายเดือน: สร้างรอบบิลแรกอัตโนมัติ
+        // สำหรับผู้เช่ารายเดือน: สร้างสัญญา + เก็บมัดจำ 3 ก้อน
+        // (ค่าเช่าเดือนแรกเป็น prepaid ครอบ 30 วันแรก จึงยังไม่ออกบิลตอนนี้
+        //  บิลใบแรกออกวันที่ 1 ของเดือนถัดไปผ่าน M6 โดยคิดเฉพาะวันที่เกิน prepaid)
+        let contractId = null;
         if (booking.rent_type === 'monthly') {
-            const today = new Date().toISOString().split('T')[0];
-            // กำหนด due_date 7 วันนับจากวันเช็คอิน
-            const checkInDate = new Date(booking.check_in_date);
-            const dueDate = new Date(checkInDate.getTime() + 7 * 86400000).toISOString().split('T')[0];
-            const roomCost = booking.price_monthly || 0;
-
-            const invoiceRes = await client.query(
-                `INSERT INTO invoices (booking_id, invoice_date, due_date, room_cost, water_cost, elec_cost, total_amount, invoice_status)
-                 VALUES ($1, $2, $3, $4, 0, 0, $4, 'ยังไม่ชำระ')
-                 RETURNING invoice_id`,
-                [id, today, dueDate, roomCost]
-            );
-
-            // ใส่รายการย่อยค่าห้องรอบแรก (น้ำ/ไฟ ออกบิลรอบถัดไปผ่านโมดูล M6)
-            await client.query(
-                `INSERT INTO invoice_details (invoice_id, item_name, quantity, unit_price, subtotal)
-                 VALUES ($1, 'ค่าห้อง (รายเดือน)', 1, $2, $2)`,
-                [invoiceRes.rows[0].invoice_id, roomCost]
-            );
+            // รับค่า override สัญญาจาก request ได้ (ไม่ส่ง = ใช้ค่า default)
+            const { endDate, billingDay, rentPrepaid, securityDeposit, keyDeposit } = req.body || {};
+            contractId = await _createContractForBooking(client, booking, {
+                endDate, billingDay, rentPrepaid, securityDeposit, keyDeposit,
+            });
         }
 
         await client.query("COMMIT");
-        res.status(200).json({ success: true, message: "เช็คอินสำเร็จ" });
+        res.status(200).json({
+            success: true,
+            message: booking.rent_type === 'monthly' ? "เช็คอินสำเร็จ + สร้างสัญญาแล้ว" : "เช็คอินสำเร็จ",
+            contractId,
+        });
 
     } catch (error) {
         await client.query("ROLLBACK");

@@ -113,35 +113,38 @@ test('createBooking: ช่วงเวลาจองซ้อน → 400 (over
 });
 
 // ============================================================
-// checkIn — status transition + บิลรายเดือนอัตโนมัติ
+// checkIn — status transition + สร้างสัญญารายเดือน (M10a)
+// (รายเดือนไม่ออกบิลตอนเช็คอินแล้ว — ค่าเช่าเดือนแรกเป็น prepaid)
 // ============================================================
 function scenarioCheckIn(bk) {
   setHandler((sql) => {
     const s = sql.trim();
     if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) return { rows: [] };
     if (has(s, 'FROM bookings b') && has(s, 'JOIN rooms r')) return { rows: bk ? [bk] : [] };
-    if (s.startsWith('INSERT INTO invoices')) return { rows: [{ invoice_id: 50 }] }; // RETURNING invoice_id
+    if (s.startsWith('INSERT INTO contracts')) return { rows: [{ contract_id: 70 }] }; // RETURNING contract_id
     return { rows: [] };
   });
 }
 
-test('checkIn: รายเดือน → สร้าง invoice รอบแรกอัตโนมัติ', async () => {
-  scenarioCheckIn({ booking_id: 1, room_id: 3, check_in_date: '2026-07-01', booking_status: 'ยืนยันการจอง', rent_type: 'monthly', price_monthly: 4500 });
+test('checkIn: รายเดือน → สร้างสัญญา (ไม่ออกบิลตอนเช็คอิน)', async () => {
+  scenarioCheckIn({ booking_id: 1, member_id: 2, room_id: 3, check_in_date: '2026-07-01', booking_status: 'ยืนยันการจอง', rent_type: 'monthly', price_monthly: 4500, deposit_amount: 4500 });
   const res = makeRes();
-  await booking.checkIn({ params: { id: 1 } }, res);
+  await booking.checkIn({ params: { id: 1 }, body: {} }, res);
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.success, true);
-  assert.ok(called('INSERT INTO invoices'), 'รายเดือนต้องออกบิลรอบแรก');
+  assert.ok(called('INSERT INTO contracts'), 'รายเดือนต้องสร้างสัญญา');
+  assert.equal(called('INSERT INTO invoices'), false, 'ไม่ออกบิลตอนเช็คอิน (เดือนแรก prepaid)');
   assert.ok(called("room_status = 'มีผู้เช่า'"), 'ห้องต้องเป็นมีผู้เช่า');
 });
 
-test('checkIn: รายวัน → ไม่สร้าง invoice', async () => {
-  scenarioCheckIn({ booking_id: 1, room_id: 1, check_in_date: '2026-07-01', booking_status: 'ยืนยันการจอง', rent_type: 'daily', price_monthly: 0 });
+test('checkIn: รายวัน → ไม่สร้างสัญญา/ไม่ออกบิล', async () => {
+  scenarioCheckIn({ booking_id: 1, member_id: 2, room_id: 1, check_in_date: '2026-07-01', booking_status: 'ยืนยันการจอง', rent_type: 'daily', price_monthly: 0 });
   const res = makeRes();
-  await booking.checkIn({ params: { id: 1 } }, res);
+  await booking.checkIn({ params: { id: 1 }, body: {} }, res);
 
   assert.equal(res.statusCode, 200);
+  assert.equal(called('INSERT INTO contracts'), false, 'รายวันไม่ต้องสร้างสัญญา');
   assert.equal(called('INSERT INTO invoices'), false, 'รายวันไม่ต้องออกบิล');
 });
 

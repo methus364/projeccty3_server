@@ -1,5 +1,6 @@
 const pool = require("../config/db");
-const { WATER_RATE, ELEC_RATE } = require("../config/utility_rates");
+const { WATER_RATE, ELEC_RATE, WATER_MINIMUM } = require("../config/utility_rates");
+const { computeMonthlyRoomCost } = require("../utils/billing");
 const { buildInvoicePdf } = require("../utils/invoicePdf");
 const { sendInvoiceMail } = require("../config/mailer");
 
@@ -24,12 +25,14 @@ function getCurrentMonth() {
 // db = client (ใน transaction) หรือ pool ก็ได้
 // ==========================================
 async function computeInvoice(db, booking, month) {
-    // 1. ค่าห้อง — รายเดือนใช้ price_monthly, รายวันใช้ room_price × จำนวนวัน
+    // 1. ค่าห้อง — รายเดือนคิดแบบ proration (ข้ามช่วง prepaid 30 วันแรก), รายวันใช้ room_price × จำนวนวัน
     let roomCost;
     let roomItemName;
     if (booking.rent_type === "monthly") {
-        roomCost = Number(booking.price_monthly) || 0;
-        roomItemName = "ค่าห้อง (รายเดือน)";
+        // เดือนแรกหลังเข้าพักจะถูก prepaid ครอบ → คิดเฉพาะวันที่เกิน (ดู utils/billing.js)
+        const rent = computeMonthlyRoomCost(booking.check_in_date, booking.price_monthly, month);
+        roomCost = rent.roomCost;
+        roomItemName = rent.itemName;
     } else {
         const start = new Date(booking.check_in_date);
         const end = new Date(booking.check_out_date);
@@ -60,14 +63,20 @@ async function computeInvoice(db, booking, month) {
     const hasElec  = meter.curr_elec  != null && meter.prev_elec  != null;
     const waterUnits = hasWater ? meter.curr_water - meter.prev_water : 0;
     const elecUnits  = hasElec  ? meter.curr_elec  - meter.prev_elec  : 0;
-    const waterCost = waterUnits * WATER_RATE;
+    // ค่าน้ำคิดขั้นต่ำ: ถ้ามีมิเตอร์แล้วคิดตามหน่วยได้ต่ำกว่าขั้นต่ำ → ใช้ค่าขั้นต่ำแทน
+    const waterByUnit = waterUnits * WATER_RATE;
+    const waterCost = hasWater ? Math.max(waterByUnit, WATER_MINIMUM) : 0;
     const elecCost  = elecUnits  * ELEC_RATE;
 
     // 3. ยอดรวม + รายการย่อย (1 บรรทัด/ประเภท)
     const totalAmount = roomCost + waterCost + elecCost;
+    // ถ้าค่าน้ำโดนขั้นต่ำ ให้ชื่อรายการบอกชัดว่าเป็นขั้นต่ำ (subtotal จะไม่เท่ากับ หน่วย×เรต)
+    const waterItemName = (hasWater && waterByUnit < WATER_MINIMUM)
+        ? `ค่าน้ำ (${waterUnits} หน่วย, ขั้นต่ำ)`
+        : `ค่าน้ำ (${waterUnits} หน่วย)`;
     const details = [
         { item_name: roomItemName, quantity: 1, unit_price: roomCost, subtotal: roomCost },
-        { item_name: `ค่าน้ำ (${waterUnits} หน่วย)`, quantity: waterUnits, unit_price: WATER_RATE, subtotal: waterCost },
+        { item_name: waterItemName, quantity: waterUnits, unit_price: WATER_RATE, subtotal: waterCost },
         { item_name: `ค่าไฟ (${elecUnits} หน่วย)`, quantity: elecUnits, unit_price: ELEC_RATE, subtotal: elecCost },
     ];
 
