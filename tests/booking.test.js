@@ -1,0 +1,211 @@
+// ============================================================
+// Unit tests — M3 Booking (controllers/booking.js)
+// ใช้ node:test (built-in) + mock database — ไม่แตะ Supabase จริง
+// รัน:  cd server && npm test
+// ============================================================
+const { test, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+
+// ---------- mock pool (แทน config/db) ----------
+const calls = [];          // เก็บทุก query ที่ถูกเรียก (ไว้ assert)
+let handler = () => ({ rows: [] });
+
+function setHandler(h) { handler = h; }
+function reset() { calls.length = 0; handler = () => ({ rows: [] }); }
+
+const mockClient = {
+  query: async (sql, params) => { calls.push({ sql, params }); return handler(sql, params); },
+  release: () => {},
+};
+const mockPool = {
+  connect: async () => mockClient,
+  query: async (sql, params) => { calls.push({ sql, params }); return handler(sql, params); },
+};
+
+// inject mock เข้า require cache ก่อน controller จะ require ('../config/db')
+const dbAbs = require.resolve(path.join(__dirname, '..', 'config', 'db.js'));
+require.cache[dbAbs] = { id: dbAbs, filename: dbAbs, loaded: true, exports: mockPool };
+
+const booking = require('../controllers/booking');
+
+// ---------- helpers ----------
+function makeRes() {
+  return {
+    statusCode: 200,
+    body: undefined,
+    status(c) { this.statusCode = c; return this; },
+    json(b) { this.body = b; return this; },
+  };
+}
+const has = (s, frag) => s.includes(frag);
+const called = (frag) => calls.some((c) => has(c.sql, frag));
+
+// handler สำหรับ flow create/admin-create
+function scenarioCreate({ room, overlap = [], bookingId = 99 }) {
+  setHandler((sql) => {
+    const s = sql.trim();
+    if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) return { rows: [] };
+    if (has(s, 'SELECT room_price') && has(s, 'FROM rooms')) return { rows: room ? [room] : [] };
+    if (has(s, 'FROM bookings') && has(s, 'booking_status NOT IN')) return { rows: overlap };
+    if (s.startsWith('INSERT INTO bookings')) return { rows: [{ booking_id: bookingId }] };
+    return { rows: [] };
+  });
+}
+
+beforeEach(reset);
+
+// ============================================================
+// createBooking — คำนวณราคา + guard
+// ============================================================
+test('createBooking: รายวัน 3 วัน → totalPrice = วัน × room_price, status 201', async () => {
+  scenarioCreate({ room: { room_price: 500, price_monthly: 4500, room_status: 'ว่าง' } });
+  const req = { body: { roomId: 1, userId: 2, startDate: '2026-07-01', endDate: '2026-07-04', rentType: 'daily' } };
+  const res = makeRes();
+  await booking.createBooking(req, res);
+
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.totalPrice, 1500);      // 3 วัน × 500
+  assert.equal(res.body.bookingId, 99);
+  assert.ok(called('UPDATE rooms'), 'ต้องอัปเดต room_status เป็นมีผู้เช่า');
+  assert.ok(called('COMMIT'), 'ต้อง COMMIT');
+});
+
+test('createBooking: รายเดือน 30 วัน → totalPrice = เดือน × price_monthly', async () => {
+  scenarioCreate({ room: { room_price: 500, price_monthly: 4500, room_status: 'ว่าง' } });
+  const req = { body: { roomId: 1, userId: 2, startDate: '2026-07-01', endDate: '2026-07-31', rentType: 'monthly' } };
+  const res = makeRes();
+  await booking.createBooking(req, res);
+
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.totalPrice, 4500);       // 1 เดือน × 4500
+});
+
+test('createBooking: ไม่พบห้อง → 400 + ROLLBACK', async () => {
+  scenarioCreate({ room: null });
+  const res = makeRes();
+  await booking.createBooking({ body: { roomId: 999, userId: 2, startDate: '2026-07-01', endDate: '2026-07-02' } }, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.success, false);
+  assert.match(res.body.message, /ไม่พบข้อมูลห้องพัก/);
+  assert.ok(called('ROLLBACK'));
+});
+
+test('createBooking: ห้องปิดปรับปรุง → 400', async () => {
+  scenarioCreate({ room: { room_price: 600, price_monthly: 5000, room_status: 'ปิดปรับปรุง' } });
+  const res = makeRes();
+  await booking.createBooking({ body: { roomId: 5, userId: 2, startDate: '2026-07-01', endDate: '2026-07-02' } }, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.message, /ปิดปรับปรุง/);
+});
+
+test('createBooking: ช่วงเวลาจองซ้อน → 400 (overlap)', async () => {
+  scenarioCreate({ room: { room_price: 500, price_monthly: 4500, room_status: 'ว่าง' }, overlap: [{ booking_id: 7 }] });
+  const res = makeRes();
+  await booking.createBooking({ body: { roomId: 2, userId: 2, startDate: '2026-07-01', endDate: '2026-07-05' } }, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.message, /ถูกจองหรือมีผู้เช่า/);
+  assert.equal(called('INSERT INTO bookings'), false, 'ต้องไม่ insert เมื่อ overlap');
+});
+
+// ============================================================
+// checkIn — status transition + บิลรายเดือนอัตโนมัติ
+// ============================================================
+function scenarioCheckIn(bk) {
+  setHandler((sql) => {
+    const s = sql.trim();
+    if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) return { rows: [] };
+    if (has(s, 'FROM bookings b') && has(s, 'JOIN rooms r')) return { rows: bk ? [bk] : [] };
+    return { rows: [] };
+  });
+}
+
+test('checkIn: รายเดือน → สร้าง invoice รอบแรกอัตโนมัติ', async () => {
+  scenarioCheckIn({ booking_id: 1, room_id: 3, check_in_date: '2026-07-01', booking_status: 'ยืนยันการจอง', rent_type: 'monthly', price_monthly: 4500 });
+  const res = makeRes();
+  await booking.checkIn({ params: { id: 1 } }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.success, true);
+  assert.ok(called('INSERT INTO invoices'), 'รายเดือนต้องออกบิลรอบแรก');
+  assert.ok(called("room_status = 'มีผู้เช่า'"), 'ห้องต้องเป็นมีผู้เช่า');
+});
+
+test('checkIn: รายวัน → ไม่สร้าง invoice', async () => {
+  scenarioCheckIn({ booking_id: 1, room_id: 1, check_in_date: '2026-07-01', booking_status: 'ยืนยันการจอง', rent_type: 'daily', price_monthly: 0 });
+  const res = makeRes();
+  await booking.checkIn({ params: { id: 1 } }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(called('INSERT INTO invoices'), false, 'รายวันไม่ต้องออกบิล');
+});
+
+test('checkIn: เช็คอินซ้ำ (สถานะกำลังเข้าพักอยู่แล้ว) → 400', async () => {
+  scenarioCheckIn({ booking_id: 1, room_id: 1, check_in_date: '2026-07-01', booking_status: 'กำลังเข้าพัก', rent_type: 'daily', price_monthly: 0 });
+  const res = makeRes();
+  await booking.checkIn({ params: { id: 1 } }, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.message, /เช็คอินไปแล้ว/);
+});
+
+// ============================================================
+// checkOut — คืนห้องเป็นว่าง
+// ============================================================
+function scenarioCheckOut(bk) {
+  setHandler((sql) => {
+    const s = sql.trim();
+    if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) return { rows: [] };
+    if (has(s, 'SELECT room_id, booking_status FROM bookings')) return { rows: bk ? [bk] : [] };
+    return { rows: [] };
+  });
+}
+
+test('checkOut: สำเร็จ → คืนห้องเป็นว่าง + status ย้ายออกแล้ว', async () => {
+  scenarioCheckOut({ room_id: 2, booking_status: 'กำลังเข้าพัก' });
+  const res = makeRes();
+  await booking.checkOut({ params: { id: 1 } }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.success, true);
+  assert.ok(called("room_status = 'ว่าง'"), 'ต้องคืนห้องเป็นว่าง');
+});
+
+test('checkOut: เช็คเอาท์ซ้ำ → 400', async () => {
+  scenarioCheckOut({ room_id: 2, booking_status: 'ย้ายออกแล้ว' });
+  const res = makeRes();
+  await booking.checkOut({ params: { id: 1 } }, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.message, /เช็คเอาท์ไปแล้ว/);
+});
+
+// ============================================================
+// editBooking — ownership / not found
+// ============================================================
+test('editBooking: ผู้เช่าแก้ของคนอื่น → 403', async () => {
+  setHandler((sql) => {
+    const s = sql.trim();
+    if (s.startsWith('SELECT * FROM bookings')) return { rows: [{ booking_id: 1, member_id: 3, room_id: 2, rent_type: 'daily' }] };
+    return { rows: [] };
+  });
+  const req = { params: { id: 1 }, body: {}, user: { role: 'Daily_Tenant', id: 2 } };  // id 2 ≠ เจ้าของ 3
+  const res = makeRes();
+  await booking.editBooking(req, res);
+
+  assert.equal(res.statusCode, 403);
+  assert.match(res.body.message, /ไม่มีสิทธิ์/);
+});
+
+test('editBooking: ไม่พบการจอง → 404', async () => {
+  setHandler(() => ({ rows: [] }));
+  const req = { params: { id: 999 }, body: {}, user: { role: 'Admin', id: 1 } };
+  const res = makeRes();
+  await booking.editBooking(req, res);
+
+  assert.equal(res.statusCode, 404);
+});
