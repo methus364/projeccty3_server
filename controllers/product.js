@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const { setAuditUser } = require("../utils/audit");
 
 // ==========================================
 // M9 — Products & Sales / ขายของหอพัก
@@ -140,6 +141,7 @@ exports.createSale = async (req, res) => {
 
     try {
         await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         // 1. ล็อกแถวสินค้าไว้กันแย่ง stock พร้อมกัน (FOR UPDATE)
         const prodRes = await client.query(

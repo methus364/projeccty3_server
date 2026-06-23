@@ -1,5 +1,6 @@
 const pool = require("../config/db");
 const { _createContractForBooking } = require("./contract");
+const { setAuditUser } = require("../utils/audit");
 
 // ==========================================
 // 1. สร้างการจองห้องพัก (createBooking) — Tenant
@@ -10,6 +11,7 @@ exports.createBooking = async (req, res) => {
 
     try {
         await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         // 1. ดึงราคาห้องพักจากตาราง rooms (ทั้ง daily และ monthly)
         const priceRes = await client.query(
@@ -170,6 +172,7 @@ exports.adminCreateBooking = async (req, res) => {
 
     try {
         await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         const priceRes = await client.query(
             `SELECT room_price, price_monthly, room_status FROM rooms WHERE room_id = $1 LIMIT 1`,
@@ -226,6 +229,7 @@ exports.editBooking = async (req, res) => {
 
     try {
         await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         // 1. ดึงข้อมูลการจองปัจจุบัน
         const currentRes = await client.query('SELECT * FROM bookings WHERE booking_id = $1', [id]);
@@ -326,6 +330,7 @@ exports.checkIn = async (req, res) => {
 
     try {
         await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         // ดึงข้อมูลการจอง + ราคารายเดือน/ค่ามัดจำของห้อง
         const bookingRes = await client.query(
@@ -395,6 +400,7 @@ exports.checkOut = async (req, res) => {
 
     try {
         await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         const bookingRes = await client.query(
             `SELECT room_id, booking_status FROM bookings WHERE booking_id = $1`,

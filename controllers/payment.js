@@ -4,6 +4,7 @@ const { buildInvoicePdf } = require("../utils/invoicePdf");
 const { buildPromptpayQr } = require("../utils/promptpayQr");
 const { sendInvoiceMail } = require("../config/mailer");
 const { uploadSlip } = require("../config/supabase");
+const { setAuditUser } = require("../utils/audit");
 
 // ==========================================
 // Helper: รวมยอดที่ "ยืนยันแล้ว" ของบิล + อัปเดต invoice_status ให้สอดคล้อง
@@ -140,6 +141,7 @@ exports.createPayment = async (req, res) => {
 
     try {
         await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         // 1. โหลดบิล + เจ้าของ (ไว้เช็คสิทธิ์ + คิดยอดคงเหลือ)
         const invoice = await _loadFullInvoice(client, invoice_id);
@@ -235,6 +237,7 @@ exports.verifyPayment = async (req, res) => {
 
     try {
         await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         const payRes = await client.query(
             `SELECT payment_id, invoice_id, payment_status FROM payments WHERE payment_id = $1`,

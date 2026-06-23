@@ -1,6 +1,7 @@
 const pool = require("../config/db");
 const { WATER_RATE, ELEC_RATE, WATER_MINIMUM } = require("../config/utility_rates");
 const { computeMonthlyRoomCost } = require("../utils/billing");
+const { setAuditUser } = require("../utils/audit");
 const { buildInvoicePdf } = require("../utils/invoicePdf");
 const { sendInvoiceMail } = require("../config/mailer");
 
@@ -159,6 +160,7 @@ exports.createInvoice = async (req, res) => {
 
     try {
         await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         // 1. โหลดข้อมูลการจอง + ห้อง
         const bookingRes = await client.query(
@@ -378,6 +380,7 @@ exports.updateInvoice = async (req, res) => {
 
     try {
         await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         const invRes = await client.query(
             `SELECT invoice_id, invoice_status FROM invoices WHERE invoice_id = $1`,
@@ -504,6 +507,7 @@ exports.generateMonthly = async (req, res) => {
             const client = await pool.connect();
             try {
                 await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
                 const calc = await computeInvoice(client, booking, month);
 
                 const invRes = await client.query(

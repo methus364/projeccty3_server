@@ -1,5 +1,6 @@
 const pool = require("../config/db");
 const { DEFAULT_KEY_DEPOSIT, DEFAULT_CONTRACT_MONTHS, NOTICE_DAYS } = require("../config/billing_rules");
+const { setAuditUser } = require("../utils/audit");
 
 // ==========================================
 // Helper: สร้างสัญญาเช่ารายเดือนให้ booking (เรียกจาก checkIn ตอนเช็คอินรายเดือน)
@@ -178,6 +179,7 @@ exports.settleContract = async (req, res) => {
 
     try {
         await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         // 1. ล็อกแถวสัญญา (กันเคลียร์ซ้ำตอน admin กดพร้อมกัน)
         const cRes = await client.query(
