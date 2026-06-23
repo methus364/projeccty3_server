@@ -4,11 +4,31 @@ const port = 5000;
 const morgan = require('morgan');
 const { readdirSync } = require('fs');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+
+// CORS — จำกัดเฉพาะ origin ของ frontend (ตั้งใน .env ว่า CLIENT_ORIGIN)
+const corsOptions = {
+  origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
+  credentials: true,
+};
+
+// Rate limit สำหรับ auth endpoint — กัน brute force
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 นาที
+  max: 30,                   // สูงสุด 30 ครั้ง/15 นาที/IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'ลองใหม่ในอีก 15 นาที (ส่งคำขอถี่เกินไป)' },
+});
 
 // middleware
 app.use(morgan('dev'));
 app.use(express.json());
-app.use(cors());
+app.use(cors(corsOptions));
+
+// ใช้ rate limit กับ auth route
+app.use('/api/login', authLimiter);
+app.use('/api/register', authLimiter);
 
 app.get('/', (req, res) => {
   res.send('Hello World');

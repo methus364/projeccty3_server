@@ -11,10 +11,18 @@ const {
 } = require("../controllers/payment");
 const { authCheck, adminCheck } = require("../middleweres/authCheck");
 
-// รับไฟล์สลิปไว้ใน memory (แล้วส่งต่อขึ้น Supabase Storage) — จำกัด 5MB
+// รับไฟล์สลิปไว้ใน memory (แล้วส่งต่อขึ้น Supabase Storage) — จำกัด 5MB + เฉพาะ image
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        // อนุญาตเฉพาะ image/* (jpg, png, webp, gif ฯลฯ) — ป้องกันอัปโหลดไฟล์แปลก
+        if (file.mimetype.startsWith('image/')) {
+            cb(null, true);
+        } else {
+            cb(new Error('อัปโหลดได้เฉพาะไฟล์รูปภาพเท่านั้น (jpg, png, webp ฯลฯ)'));
+        }
+    },
 });
 
 // Admin: ดูรายการชำระทั้งหมด

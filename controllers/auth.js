@@ -24,8 +24,8 @@ exports.register = async (req, res) => {
     // 2. Hash Password
     const hashPassword = await bcrypt.hash(password, 10);
 
-    // 3. กำหนด Role
-    const finalRole = user_role || 'Daily_Tenant';
+    // 3. บังคับ role เป็น Daily_Tenant เสมอ — เลื่อน role ผ่าน admin เท่านั้น (กัน privilege escalation)
+    const finalRole = 'Daily_Tenant';
 
     // 4. INSERT รวม email
     await pool.query(
@@ -59,6 +59,10 @@ exports.login = async (req, res) => {
     }
 
     // 2. ตรวจสอบรหัสผ่านด้วย bcrypt
+    // กัน error 500 กรณีบัญชี social-only ที่ password เป็น NULL
+    if (!user.password) {
+      return res.status(401).json({ message: "บัญชีนี้ผูกกับ Social Login — กรุณาเข้าสู่ระบบผ่าน Line/Google" });
+    }
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(401).json({ message: "Invalid Username or Password" });
