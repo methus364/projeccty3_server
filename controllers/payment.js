@@ -1,5 +1,5 @@
 const pool = require("../config/db");
-const { _loadFullInvoice } = require("./invoice");
+const { _loadFullInvoice, _calculateLateFee } = require("./invoice");
 const { buildInvoicePdf } = require("../utils/invoicePdf");
 const { buildPromptpayQr } = require("../utils/promptpayQr");
 const { sendInvoiceMail } = require("../config/mailer");
@@ -99,13 +99,14 @@ exports.getPromptpayQr = async (req, res) => {
             return res.status(403).json({ success: false, message: "ไม่มีสิทธิ์เข้าถึงบิลนี้" });
         }
 
-        // คิดยอดคงเหลือที่ต้องชำระ (ยอดบิล − ที่ยืนยันแล้ว)
+        // คิดยอดคงเหลือที่ต้องชำระ (ยอดบิล + ค่าปรับล่าช้า − ที่ยืนยันแล้ว)
         const sumRes = await pool.query(
             `SELECT COALESCE(SUM(amount_paid), 0) AS paid_sum
              FROM payments WHERE invoice_id = $1 AND payment_status = 'ยืนยันแล้ว'`,
             [id]
         );
-        const remaining = Number(invoice.total_amount) - Number(sumRes.rows[0].paid_sum);
+        const lateFee = invoice.invoice_status !== 'ชำระแล้ว' ? _calculateLateFee(invoice.due_date) : 0;
+        const remaining = Number(invoice.total_amount) + lateFee - Number(sumRes.rows[0].paid_sum);
         const qr = await buildPromptpayQr(remaining > 0 ? remaining : 0);
 
         res.json({
@@ -115,6 +116,7 @@ exports.getPromptpayQr = async (req, res) => {
                 promptpayId: qr.promptpayId,
                 amount: qr.amount,
                 invoiceId: Number(id),
+                late_fee: lateFee,
             },
         });
     } catch (error) {
@@ -142,6 +144,9 @@ exports.createPayment = async (req, res) => {
     try {
         await client.query("BEGIN");
         await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
+
+        // ล็อก invoice row ก่อนอ่าน+เขียน เพื่อกัน race condition ชำระพร้อมกัน
+        await client.query(`SELECT invoice_id FROM invoices WHERE invoice_id = $1 FOR UPDATE`, [invoice_id]);
 
         // 1. โหลดบิล + เจ้าของ (ไว้เช็คสิทธิ์ + คิดยอดคงเหลือ)
         const invoice = await _loadFullInvoice(client, invoice_id);
@@ -239,8 +244,9 @@ exports.verifyPayment = async (req, res) => {
         await client.query("BEGIN");
         await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
+        // ล็อก payment row + invoice row เพื่อกัน admin 2 คนยืนยันพร้อมกัน
         const payRes = await client.query(
-            `SELECT payment_id, invoice_id, payment_status FROM payments WHERE payment_id = $1`,
+            `SELECT payment_id, invoice_id, payment_status FROM payments WHERE payment_id = $1 FOR UPDATE`,
             [id]
         );
         if (payRes.rows.length === 0) {
@@ -248,6 +254,8 @@ exports.verifyPayment = async (req, res) => {
             return res.status(404).json({ success: false, message: "ไม่พบรายการชำระเงินที่ระบุ" });
         }
         const invoiceId = payRes.rows[0].invoice_id;
+        // ล็อก invoice ด้วยเพื่อกัน recomputeInvoiceStatus ชนกัน
+        await client.query(`SELECT invoice_id FROM invoices WHERE invoice_id = $1 FOR UPDATE`, [invoiceId]);
 
         // อัปเดตสถานะการชำระตาม action
         const newStatus = action === "approve" ? "ยืนยันแล้ว" : "ปฏิเสธ";

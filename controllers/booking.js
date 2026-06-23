@@ -7,7 +7,9 @@ const { setAuditUser } = require("../utils/audit");
 // ==========================================
 exports.createBooking = async (req, res) => {
     const client = await pool.connect();
-    const { roomId, userId, startDate, endDate, rentType = 'daily' } = req.body;
+    const { roomId, startDate, endDate, rentType = 'daily' } = req.body;
+    // บังคับใช้ userId จาก token เสมอ — กันผู้เช่าจองในชื่อคนอื่น
+    const userId = req.user.id;
 
     try {
         await client.query("BEGIN");
@@ -243,6 +245,29 @@ exports.editBooking = async (req, res) => {
         if (req.user.role !== "Admin" && current.member_id !== req.user.id) {
             await client.query("ROLLBACK");
             return res.status(403).json({ success: false, message: "ไม่มีสิทธิ์แก้ไขการจองนี้" });
+        }
+
+        // ถ้าไม่ใช่ Admin: จำกัดสิทธิ์ — ยกเลิกได้อย่างเดียวและเฉพาะก่อนเช็คอิน
+        if (req.user.role !== "Admin") {
+            // ห้ามแตะฟิลด์ที่ admin เท่านั้นควรแก้ได้
+            if (roomId || userId || startDate || endDate) {
+                await client.query("ROLLBACK");
+                return res.status(403).json({ success: false, message: "ผู้เช่าแก้ไขได้เฉพาะการยกเลิกเท่านั้น" });
+            }
+            // ต้องส่ง status='ยกเลิก' มาเท่านั้น
+            if (status !== "ยกเลิก") {
+                await client.query("ROLLBACK");
+                return res.status(403).json({ success: false, message: 'ผู้เช่าเปลี่ยนสถานะได้เฉพาะ "ยกเลิก" เท่านั้น' });
+            }
+            // ยกเลิกได้เฉพาะก่อนเช็คอิน (สถานะรอ/ยืนยันแล้ว)
+            const cancellableStatuses = ['รอชำระมัดจำ', 'ยืนยันการจอง'];
+            if (!cancellableStatuses.includes(current.booking_status)) {
+                await client.query("ROLLBACK");
+                return res.status(400).json({
+                    success: false,
+                    message: `ไม่สามารถยกเลิกได้ สถานะปัจจุบันคือ "${current.booking_status}"`
+                });
+            }
         }
 
         const targetRoomId = roomId  || current.room_id;

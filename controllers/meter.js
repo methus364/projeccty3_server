@@ -31,22 +31,60 @@ exports.recordMeter = async (req, res) => {
         return res.status(400).json({ success: false, message: 'หน่วยมิเตอร์ต้องเป็นตัวเลขที่ไม่ติดลบ' });
     }
 
-    // UPSERT — 1 ห้อง บันทึกได้ 1 ครั้ง/เดือน; ถ้าบันทึกซ้ำให้ override
-    const result = await pool.query(
-        `INSERT INTO utility_meters
-             (room_id, record_month, water_current_unit, elec_current_unit, recorded_by)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (room_id, record_month)
-         DO UPDATE SET
-             water_current_unit = EXCLUDED.water_current_unit,
-             elec_current_unit  = EXCLUDED.elec_current_unit,
-             recorded_by        = EXCLUDED.recorded_by,
-             recorded_at        = CURRENT_TIMESTAMP
-         RETURNING *`,
-        [room_id, record_month, water_current_unit, elec_current_unit, recordedBy]
-    );
+    try {
+        // เช็คว่าเลขมิเตอร์ปัจจุบันน้อยกว่าเดือนก่อน (อาจกรอกผิดหรือมิเตอร์รีเซ็ต)
+        // ถ้ามิเตอร์รีเซ็ตจริง admin ส่ง override:true มาเพื่อบายพาสการเช็คนี้
+        const prevMonth = getPrevMonth(record_month);
+        const prevRes = await pool.query(
+            `SELECT water_current_unit, elec_current_unit FROM utility_meters
+             WHERE room_id = $1 AND record_month = $2`,
+            [room_id, prevMonth]
+        );
 
-    res.status(201).json({ success: true, data: result.rows[0], message: 'บันทึกมิเตอร์สำเร็จ' });
+        if (prevRes.rows.length > 0) {
+            const prev = prevRes.rows[0];
+            const override = req.body.override === true;
+
+            if (Number(water_current_unit) < Number(prev.water_current_unit) && !override) {
+                return res.status(400).json({
+                    success: false,
+                    message: `เลขมิเตอร์น้ำ (${water_current_unit}) น้อยกว่าเดือนก่อน (${prev.water_current_unit}) — ตรวจสอบอีกครั้ง หรือส่ง override:true ถ้ามิเตอร์รีเซ็ตจริง`,
+                    prevWater: Number(prev.water_current_unit),
+                    prevElec:  Number(prev.elec_current_unit),
+                });
+            }
+
+            if (Number(elec_current_unit) < Number(prev.elec_current_unit) && !override) {
+                return res.status(400).json({
+                    success: false,
+                    message: `เลขมิเตอร์ไฟ (${elec_current_unit}) น้อยกว่าเดือนก่อน (${prev.elec_current_unit}) — ตรวจสอบอีกครั้ง หรือส่ง override:true ถ้ามิเตอร์รีเซ็ตจริง`,
+                    prevWater: Number(prev.water_current_unit),
+                    prevElec:  Number(prev.elec_current_unit),
+                });
+            }
+        }
+
+        // UPSERT — 1 ห้อง บันทึกได้ 1 ครั้ง/เดือน; ถ้าบันทึกซ้ำให้ override
+        const result = await pool.query(
+            `INSERT INTO utility_meters
+                 (room_id, record_month, water_current_unit, elec_current_unit, recorded_by)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (room_id, record_month)
+             DO UPDATE SET
+                 water_current_unit = EXCLUDED.water_current_unit,
+                 elec_current_unit  = EXCLUDED.elec_current_unit,
+                 recorded_by        = EXCLUDED.recorded_by,
+                 recorded_at        = CURRENT_TIMESTAMP
+             RETURNING *`,
+            [room_id, record_month, water_current_unit, elec_current_unit, recordedBy]
+        );
+
+        res.status(201).json({ success: true, data: result.rows[0], message: 'บันทึกมิเตอร์สำเร็จ' });
+
+    } catch (error) {
+        console.error('recordMeter Error:', error.message);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกมิเตอร์' });
+    }
 };
 
 // ==========================================

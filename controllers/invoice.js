@@ -6,6 +6,21 @@ const { buildInvoicePdf } = require("../utils/invoicePdf");
 const { sendInvoiceMail } = require("../config/mailer");
 
 // ==========================================
+// Helper: คำนวณค่าปรับจ่ายบิลช้า 50 บาท/วัน นับจากวันครบกำหนด
+// คืน 0 ถ้ายังไม่เลย due_date หรือ due_date ไม่มีค่า
+// ==========================================
+function calculateLateFee(dueDate) {
+    if (!dueDate) return 0;
+    const today = new Date();
+    const due = new Date(dueDate);
+    today.setHours(0, 0, 0, 0);
+    due.setHours(0, 0, 0, 0);
+    const daysLate = Math.floor((today - due) / 86400000);
+    if (daysLate <= 0) return 0;
+    return daysLate * 50; // 50 บาท/วัน
+}
+
+// ==========================================
 // Helper: คืนค่าเดือนก่อนหน้าจาก 'YYYY-MM' (reuse logic เดียวกับ meter)
 // ==========================================
 function getPrevMonth(yyyyMM) {
@@ -272,7 +287,12 @@ exports.getInvoices = async (req, res) => {
             params
         );
 
-        res.json({ success: true, count: result.rows.length, data: result.rows });
+        // เพิ่ม late_fee ให้แต่ละบิลที่ยังไม่ชำระและเลย due_date
+        const rows = result.rows.map(row => ({
+            ...row,
+            late_fee: row.invoice_status !== 'ชำระแล้ว' ? calculateLateFee(row.due_date) : 0,
+        }));
+        res.json({ success: true, count: rows.length, data: rows });
     } catch (error) {
         console.error("getInvoices Error:", error.message);
         res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการดึงรายการบิล" });
@@ -309,7 +329,12 @@ exports.getMyInvoices = async (req, res) => {
             params
         );
 
-        res.json({ success: true, count: result.rows.length, data: result.rows });
+        // เพิ่ม late_fee ให้แต่ละบิลที่ยังไม่ชำระและเลย due_date
+        const rows = result.rows.map(row => ({
+            ...row,
+            late_fee: row.invoice_status !== 'ชำระแล้ว' ? calculateLateFee(row.due_date) : 0,
+        }));
+        res.json({ success: true, count: rows.length, data: rows });
     } catch (error) {
         console.error("getMyInvoices Error:", error.message);
         res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการดึงบิลของคุณ" });
@@ -334,6 +359,8 @@ exports.getInvoiceById = async (req, res) => {
             return res.status(403).json({ success: false, message: "ไม่มีสิทธิ์ดูใบแจ้งหนี้นี้" });
         }
 
+        // เพิ่ม late_fee ถ้าบิลยังไม่ชำระและเลย due_date
+        invoice.late_fee = invoice.invoice_status !== 'ชำระแล้ว' ? calculateLateFee(invoice.due_date) : 0;
         res.json({ success: true, data: invoice });
     } catch (error) {
         console.error("getInvoiceById Error:", error.message);
@@ -554,6 +581,7 @@ exports.generateMonthly = async (req, res) => {
     }
 };
 
-// export helper เพื่อให้ controller อื่น (เช่น booking checkIn) reuse ได้
+// export helpers เพื่อให้ controller อื่น (เช่น booking checkIn, payment) reuse ได้
 exports._computeInvoice = computeInvoice;
 exports._loadFullInvoice = loadFullInvoice;
+exports._calculateLateFee = calculateLateFee;
