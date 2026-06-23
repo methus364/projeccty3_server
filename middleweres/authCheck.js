@@ -56,7 +56,27 @@ exports.tenantCheck = async (req, res, next) => {
   }
 };
 
-// --- 3. ตรวจสอบว่าเป็นผู้ดูแลระบบหรือไม่ (Admin Check) ---
+// --- 3. ตรวจสอบว่าเป็น Monthly_Tenant เท่านั้น (สำหรับฟีเจอร์เช่ารายเดือน เช่น แจ้งซ่อม/สัญญา) ---
+exports.monthlyTenantCheck = async (req, res, next) => {
+  try {
+    const { username } = req.user;
+    const result = await pool.query(
+      'SELECT user_role FROM Members WHERE username = $1 LIMIT 1',
+      [username]
+    );
+    const user = result.rows[0];
+    // กันผู้เช่ารายวัน (Daily_Tenant) ยิง API แจ้งซ่อมตรงๆ
+    if (!user || user.user_role !== 'Monthly_Tenant') {
+      return res.status(403).json({ message: "Access Denied: Monthly Tenant Only" });
+    }
+    next();
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error access denied" });
+  }
+};
+
+// --- 4. ตรวจสอบว่าเป็นผู้ดูแลระบบหรือไม่ (Admin Check) ---
 exports.adminCheck = async (req, res, next) => {
   try {
     const { username } = req.user;
