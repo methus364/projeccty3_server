@@ -4,7 +4,8 @@ const pool = require("../config/db");
 // 1. สร้างห้องพักใหม่ (createRoom)
 // ==========================================
 exports.createRoom = async (req, res) => {
-  const { number, room_status, type_name, room_price, price_monthly, deposit_amount, image_url } = req.body;
+  const { number, room_status, type_name, room_price, price_monthly, deposit_amount, image_url,
+          description, amenities, room_size } = req.body;
 
   if (!number) {
     return res.status(400).json({ success: false, message: "กรุณาระบุหมายเลขห้อง" });
@@ -12,10 +13,16 @@ exports.createRoom = async (req, res) => {
 
   try {
     const result = await pool.query(
-      `INSERT INTO rooms (room_number, room_status, type_name, room_price, price_monthly, deposit_amount, image_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO rooms
+         (room_number, room_status, type_name, room_price, price_monthly, deposit_amount, image_url,
+          description, amenities, room_size)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        RETURNING room_id`,
-      [number, room_status || 'ว่าง', type_name || null, room_price || null, price_monthly || null, deposit_amount || null, image_url || null]
+      [
+        number, room_status || 'ว่าง', type_name || null,
+        room_price || null, price_monthly || null, deposit_amount || null, image_url || null,
+        description || null, amenities || null, room_size || null,
+      ]
     );
 
     res.status(201).json({
@@ -43,7 +50,10 @@ exports.getRooms = async (req, res) => {
          room_price     AS "price",
          price_monthly  AS "priceMonthly",
          deposit_amount AS "depositAmount",
-         image_url      AS "imageUrl"
+         image_url      AS "imageUrl",
+         description    AS "description",
+         amenities      AS "amenities",
+         room_size      AS "roomSize"
        FROM rooms
        WHERE room_status != 'ปิดปรับปรุง'
        ORDER BY room_number ASC`
@@ -61,7 +71,8 @@ exports.getRooms = async (req, res) => {
 // ==========================================
 exports.editRoom = async (req, res) => {
   const { id } = req.params;
-  const { number, status, type_name, room_price, price_monthly, deposit_amount, image_url } = req.body;
+  const { number, status, type_name, room_price, price_monthly, deposit_amount, image_url,
+          description, amenities, room_size } = req.body;
 
   try {
     const currentRes = await pool.query('SELECT * FROM rooms WHERE room_id = $1', [id]);
@@ -78,8 +89,11 @@ exports.editRoom = async (req, res) => {
          room_price     = $4,
          price_monthly  = $5,
          deposit_amount = $6,
-         image_url      = $7
-       WHERE room_id = $8`,
+         image_url      = $7,
+         description    = $8,
+         amenities      = $9,
+         room_size      = $10
+       WHERE room_id = $11`,
       [
         number         !== undefined ? number         : c.room_number,
         status         !== undefined ? status         : c.room_status,
@@ -88,6 +102,9 @@ exports.editRoom = async (req, res) => {
         price_monthly  !== undefined ? price_monthly  : c.price_monthly,
         deposit_amount !== undefined ? deposit_amount : c.deposit_amount,
         image_url      !== undefined ? image_url      : c.image_url,
+        description    !== undefined ? description    : c.description,
+        amenities      !== undefined ? amenities      : c.amenities,
+        room_size      !== undefined ? room_size      : c.room_size,
         id,
       ]
     );
@@ -116,11 +133,17 @@ exports.searchRooms = async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT
-         room_id    AS "id",
-         room_number AS "number",
-         room_status AS "status",
-         type_name  AS "typeName",
-         room_price AS "price"
+         room_id        AS "id",
+         room_number    AS "number",
+         room_status    AS "status",
+         type_name      AS "typeName",
+         room_price     AS "price",
+         price_monthly  AS "priceMonthly",
+         deposit_amount AS "depositAmount",
+         image_url      AS "imageUrl",
+         description    AS "description",
+         amenities      AS "amenities",
+         room_size      AS "roomSize"
        FROM rooms
        WHERE room_status = 'ว่าง'
          AND room_id NOT IN (
