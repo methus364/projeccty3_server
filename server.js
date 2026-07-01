@@ -5,10 +5,24 @@ const morgan = require('morgan');
 const { readdirSync } = require('fs');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const { startMonthlyBillingCron } = require('./utils/scheduler');
 
-// CORS — จำกัดเฉพาะ origin ของ frontend (ตั้งใน .env ว่า CLIENT_ORIGIN)
+// CORS — อนุญาต web frontend และ mobile app (React Native ไม่ส่ง origin header)
+const allowedOrigins = [
+  process.env.CLIENT_ORIGIN,
+  'http://localhost:5173',
+  'http://localhost:8080',
+].filter(Boolean);
+
 const corsOptions = {
-  origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173'||'http://localhost:8080',
+  origin: (origin, callback) => {
+    // origin = undefined หมายถึง mobile app หรือ server-to-server → อนุญาต
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
 };
 
@@ -53,4 +67,5 @@ app.use((err, req, res, next) => {
 
 app.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
+  startMonthlyBillingCron();
 });
