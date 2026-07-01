@@ -40,4 +40,16 @@ async function sendInvoiceMail({ to, subject, text, pdfBuffer, filename }) {
     });
 }
 
-module.exports = { sendInvoiceMail };
+// ส่งอีเมลข้อความธรรมดา (ไม่มีไฟล์แนบ) — ใช้กับอีเมลยืนยันการจอง
+// to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ
+async function sendMail({ to, subject, text }) {
+    const mailer = getTransporter();
+    await mailer.sendMail({
+        from: `หอพัก Around Loei <${MAIL_USER}>`,
+        to,
+        subject,
+        text,
+    });
+}
+
+module.exports = { sendInvoiceMail, sendMail };

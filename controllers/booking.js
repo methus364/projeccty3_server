@@ -1,6 +1,54 @@
 const pool = require("../config/db");
 const { _createContractForBooking } = require("./contract");
 const { setAuditUser } = require("../utils/audit");
+const { sendMail } = require("../config/mailer");
+
+// สร้างเลขอ้างอิงการจองให้อ่านง่าย เช่น BK-2026-0042
+function formatBookingRef(bookingId) {
+    const year = new Date().getFullYear();
+    const idPart = String(bookingId).padStart(4, "0");
+    return `BK-${year}-${idPart}`;
+}
+
+// ส่งอีเมลยืนยันการจอง — แยกเป็นฟังก์ชันเพื่ออ่านง่าย
+// ใช้รูปแบบ degrade graceful เหมือน M6: ถ้าส่งไม่สำเร็จ การจองยังถือว่าสำเร็จ
+async function sendBookingConfirmation({ email, fullName, bookingRef, roomNumber, checkIn, checkOut, nights, totalPrice, rentType }) {
+    // ไม่มีอีเมลผู้เช่า → ข้ามการส่ง (ไม่ถือเป็น error)
+    if (!email) return { sent: false, reason: "ไม่มีอีเมลผู้เช่า" };
+
+    const rentLabel = rentType === "monthly" ? "รายเดือน" : "รายวัน";
+    const text =
+`เรียน คุณ${fullName || ""}
+
+การจองห้องพักของคุณสำเร็จแล้ว รายละเอียดดังนี้
+
+เลขที่การจอง : ${bookingRef}
+ห้องพัก      : ${roomNumber}
+ประเภท       : ${rentLabel}
+วันเข้าพัก   : ${checkIn}
+วันออก       : ${checkOut}
+จำนวน        : ${nights} วัน
+ยอดรวมโดยประมาณ : ${Number(totalPrice).toLocaleString()} บาท
+
+สถานะปัจจุบัน: รอชำระมัดจำ
+กรุณาติดต่อเจ้าหน้าที่เพื่อชำระมัดจำและยืนยันการเข้าพัก
+
+ขอบคุณที่ใช้บริการ
+หอพัก Around Loei`;
+
+    try {
+        await sendMail({
+            to: email,
+            subject: `ยืนยันการจอง ${bookingRef} - หอพัก Around Loei`,
+            text,
+        });
+        return { sent: true };
+    } catch (err) {
+        // ส่งอีเมลล้มเหลวไม่ควรทำให้การจองล้มเหลว — แค่ log ไว้
+        console.error("Booking Mail Error:", err.message);
+        return { sent: false, reason: err.message };
+    }
+}
 
 // ==========================================
 // 1. สร้างการจองห้องพัก (createBooking) — Tenant
@@ -17,13 +65,13 @@ exports.createBooking = async (req, res) => {
 
         // 1. ดึงราคาห้องพักจากตาราง rooms (ทั้ง daily และ monthly)
         const priceRes = await client.query(
-            `SELECT room_price, price_monthly, room_status FROM rooms WHERE room_id = $1 LIMIT 1`,
+            `SELECT room_price, price_monthly, room_status, room_number FROM rooms WHERE room_id = $1 LIMIT 1`,
             [roomId]
         );
 
         if (priceRes.rows.length === 0) throw new Error("ไม่พบข้อมูลห้องพักนี้ในระบบ");
 
-        const { room_price, price_monthly, room_status } = priceRes.rows[0];
+        const { room_number, room_price, price_monthly, room_status } = priceRes.rows[0];
 
         if (room_status === 'ปิดปรับปรุง') throw new Error("ห้องพักนี้ปิดปรับปรุงอยู่ ไม่สามารถจองได้");
 
@@ -64,10 +112,41 @@ exports.createBooking = async (req, res) => {
         );
 
         await client.query("COMMIT");
+
+        const bookingId = bookingRes.rows[0].booking_id;
+        const bookingRef = formatBookingRef(bookingId);
+
+        // ส่งอีเมลยืนยันการจอง (หลัง COMMIT — ทำนอก transaction)
+        // ดึงอีเมล/ชื่อผู้เช่าจากตาราง members
+        const memberRes = await pool.query(
+            `SELECT email, full_name FROM members WHERE member_id = $1 LIMIT 1`,
+            [userId]
+        );
+        const member = memberRes.rows[0] || {};
+
+        const mailResult = await sendBookingConfirmation({
+            email: member.email,
+            fullName: member.full_name,
+            bookingRef,
+            roomNumber: room_number,
+            checkIn: startDate,
+            checkOut: endDate,
+            nights: diffDays,
+            totalPrice,
+            rentType,
+        });
+
         res.status(201).json({
             success: true,
-            bookingId: bookingRes.rows[0].booking_id,
-            totalPrice
+            bookingId,
+            bookingRef,
+            roomNumber: room_number,
+            checkInDate: startDate,
+            checkOutDate: endDate,
+            nights: diffDays,
+            rentType,
+            totalPrice,
+            emailSent: mailResult.sent,
         });
 
     } catch (error) {

@@ -8,7 +8,7 @@ const rateLimit = require('express-rate-limit');
 
 // CORS — จำกัดเฉพาะ origin ของ frontend (ตั้งใน .env ว่า CLIENT_ORIGIN)
 const corsOptions = {
-  origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
+  origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173'||'http://localhost:8080',
   credentials: true,
 };
 
