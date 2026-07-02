@@ -47,6 +47,16 @@ async function recomputeInvoiceStatus(db, invoiceId) {
         [status, invoiceId]
     );
 
+    // จ่ายครบ → ยืนยันการจองที่ผูกกับบิลนี้อัตโนมัติ (ครอบทุกช่องทาง: อัปสลิป/เงินสด)
+    if (status === "ชำระแล้ว") {
+        await db.query(
+            `UPDATE bookings SET booking_status = 'ยืนยันการจอง'
+             WHERE booking_id = (SELECT booking_id FROM invoices WHERE invoice_id = $1)
+               AND booking_status = 'รอชำระมัดจำ'`,
+            [invoiceId]
+        );
+    }
+
     return { status, paidSum, total };
 }
 
@@ -401,17 +411,6 @@ async function confirmPaymentPaid(paymentId) {
         await client.query(`SELECT invoice_id FROM invoices WHERE invoice_id = $1 FOR UPDATE`, [pay.invoice_id]);
         await client.query(`UPDATE payments SET payment_status = 'ยืนยันแล้ว' WHERE payment_id = $1`, [paymentId]);
         const result = await recomputeInvoiceStatus(client, pay.invoice_id);
-
-        // จ่ายครบ → ยืนยันการจองที่ผูกกับบิลนี้อัตโนมัติ (แบบ Agoda: จ่ายเสร็จ = จองยืนยัน)
-        if (result.status === "ชำระแล้ว") {
-            await client.query(
-                `UPDATE bookings SET booking_status = 'ยืนยันการจอง'
-                 WHERE booking_id = (SELECT booking_id FROM invoices WHERE invoice_id = $1)
-                   AND booking_status = 'รอชำระมัดจำ'`,
-                [pay.invoice_id]
-            );
-        }
-
         await client.query("COMMIT");
 
         // ชำระครบ → ออกใบเสร็จ + ส่งอีเมล (best-effort หลัง commit)
@@ -654,24 +653,15 @@ exports.payBookingNow = async (req, res) => {
             );
         }
 
-        // สร้าง payment row 'รอตรวจ' + charge Omise
-        const payRes = await client.query(
-            `INSERT INTO payments (invoice_id, payment_method, amount_paid, payment_status)
-             VALUES ($1, 'โอนเงิน', $2, 'รอตรวจ')
-             RETURNING payment_id`,
-            [invoiceId, total]
-        );
-        const paymentId = payRes.rows[0].payment_id;
-
-        const charge = await createPromptPayCharge(total, { payment_id: String(paymentId) });
-        await client.query(`UPDATE payments SET payment_evidence = $1 WHERE payment_id = $2`, [charge.chargeId, paymentId]);
-
         await client.query("COMMIT");
+
+        // สร้าง QR PromptPay static (ฟรี ไม่ง้อ gateway) — ผู้เช่าสแกนโอนแล้วอัปสลิปทีหลัง
+        const qr = await buildPromptpayQr(total);
 
         res.status(201).json({
             success: true,
-            data: { paymentId, invoiceId, chargeId: charge.chargeId, qrImage: charge.qrImage, amount: total },
-            message: "สร้าง QR สำหรับชำระค่าจองสำเร็จ",
+            data: { invoiceId, qrImage: qr.dataUrl, promptpayId: qr.promptpayId, amount: total },
+            message: "สร้าง QR สำหรับชำระค่าจองสำเร็จ กรุณาโอนแล้วแนบสลิป",
         });
     } catch (error) {
         await client.query("ROLLBACK");

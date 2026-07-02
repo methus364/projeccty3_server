@@ -353,7 +353,6 @@ test('payBookingNow: รายวัน สถานะรอชำระ → 20
     }
     if (has(q, "invoice_status != 'ยกเลิก'")) return { rows: [] };       // ยังไม่มีบิลเดิม
     if (q.startsWith('INSERT INTO invoices')) return { rows: [{ invoice_id: 88 }] };
-    if (q.startsWith('INSERT INTO payments')) return { rows: [{ payment_id: 91 }] };
     return { rows: [] };
   });
   const req = { params: { id: 5 }, user: { id: 2, role: 'Monthly_Tenant' } };
@@ -361,9 +360,9 @@ test('payBookingNow: รายวัน สถานะรอชำระ → 20
   await payment.payBookingNow(req, res);
 
   assert.equal(res.statusCode, 201);
-  assert.equal(res.body.data.paymentId, 91);
+  assert.equal(res.body.data.invoiceId, 88);
   assert.equal(res.body.data.amount, 1500);          // 3 วัน × 500
-  assert.equal(res.body.data.qrImage, 'https://omise/qr.png');
+  assert.equal(res.body.data.qrImage, 'data:img');   // QR PromptPay static (mock buildPromptpayQr)
 });
 
 test('payBookingNow: รายเดือน → 400 (จ่ายตอนเช็คอิน)', async () => {
