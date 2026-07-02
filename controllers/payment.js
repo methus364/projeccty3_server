@@ -476,7 +476,7 @@ exports.createQrCharge = async (req, res) => {
         // สร้าง payment row สถานะ 'รอตรวจ' ก่อน (จะได้ payment_id ไปแนบใน charge metadata)
         const payRes = await client.query(
             `INSERT INTO payments (invoice_id, payment_method, amount_paid, payment_status)
-             VALUES ($1, 'PromptPay QR', $2, 'รอตรวจ')
+             VALUES ($1, 'โอนเงิน', $2, 'รอตรวจ')
              RETURNING payment_id`,
             [id, remaining]
         );
@@ -657,7 +657,7 @@ exports.payBookingNow = async (req, res) => {
         // สร้าง payment row 'รอตรวจ' + charge Omise
         const payRes = await client.query(
             `INSERT INTO payments (invoice_id, payment_method, amount_paid, payment_status)
-             VALUES ($1, 'PromptPay QR', $2, 'รอตรวจ')
+             VALUES ($1, 'โอนเงิน', $2, 'รอตรวจ')
              RETURNING payment_id`,
             [invoiceId, total]
         );
