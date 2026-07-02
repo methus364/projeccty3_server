@@ -401,6 +401,17 @@ async function confirmPaymentPaid(paymentId) {
         await client.query(`SELECT invoice_id FROM invoices WHERE invoice_id = $1 FOR UPDATE`, [pay.invoice_id]);
         await client.query(`UPDATE payments SET payment_status = 'ยืนยันแล้ว' WHERE payment_id = $1`, [paymentId]);
         const result = await recomputeInvoiceStatus(client, pay.invoice_id);
+
+        // จ่ายครบ → ยืนยันการจองที่ผูกกับบิลนี้อัตโนมัติ (แบบ Agoda: จ่ายเสร็จ = จองยืนยัน)
+        if (result.status === "ชำระแล้ว") {
+            await client.query(
+                `UPDATE bookings SET booking_status = 'ยืนยันการจอง'
+                 WHERE booking_id = (SELECT booking_id FROM invoices WHERE invoice_id = $1)
+                   AND booking_status = 'รอชำระมัดจำ'`,
+                [pay.invoice_id]
+            );
+        }
+
         await client.query("COMMIT");
 
         // ชำระครบ → ออกใบเสร็จ + ส่งอีเมล (best-effort หลัง commit)
@@ -572,6 +583,102 @@ exports.omiseWebhook = async (req, res) => {
     } catch (error) {
         console.error("omiseWebhook Error:", error.message);
         res.json({ success: true }); // ตอบ 200 กัน retry ถล่ม — log ไว้ตรวจเอง
+    }
+};
+
+// ==========================================
+// 9. จ่ายเงินตอนจอง (แบบ Agoda) — เฉพาะรายวัน — Tenant/Admin
+//    POST /booking/:id/pay-now
+//    สร้างบิลค่าห้องเต็มจำนวน + QR Omise ให้จ่ายทันที (จ่ายครบ → จองยืนยันอัตโนมัติ)
+// ==========================================
+exports.payBookingNow = async (req, res) => {
+    const client = await pool.connect();
+    const { id } = req.params;
+
+    try {
+        await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id);
+
+        // โหลด+ล็อกการจอง พร้อมราคาห้อง
+        const bkRes = await client.query(
+            `SELECT b.booking_id, b.member_id, b.rent_type, b.booking_status,
+                    b.check_in_date, b.check_out_date, r.room_price
+             FROM bookings b JOIN rooms r ON b.room_id = r.room_id
+             WHERE b.booking_id = $1 FOR UPDATE`,
+            [id]
+        );
+        if (bkRes.rows.length === 0) throw new Error("ไม่พบการจองที่ระบุ");
+        const bk = bkRes.rows[0];
+
+        // เช็คสิทธิ์ + เงื่อนไข (จ่ายตอนจองเฉพาะรายวัน + ยังรอชำระ)
+        if (req.user.role !== "Admin" && bk.member_id !== req.user.id) {
+            await client.query("ROLLBACK");
+            return res.status(403).json({ success: false, message: "ไม่มีสิทธิ์ชำระการจองนี้" });
+        }
+        if (bk.rent_type !== "daily") {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ success: false, message: "จ่ายตอนจองรองรับเฉพาะห้องรายวัน (รายเดือนชำระตอนเช็คอิน)" });
+        }
+        if (bk.booking_status !== "รอชำระมัดจำ") {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ success: false, message: `การจองนี้สถานะ "${bk.booking_status}" ไม่ต้องชำระซ้ำ` });
+        }
+
+        // คิดค่าห้องเต็มจำนวน (ราคา/วัน × จำนวนวัน)
+        const nights = Math.ceil(Math.abs(new Date(bk.check_out_date) - new Date(bk.check_in_date)) / 86400000) || 1;
+        const total = nights * Number(bk.room_price || 0);
+        if (!(total > 0)) throw new Error("คำนวณยอดค่าห้องไม่ได้");
+
+        // หาบิลเดิมของการจองนี้ (กันออกซ้ำ) — ถ้าไม่มีค่อยสร้างใหม่
+        let invoiceId;
+        const existInv = await client.query(
+            `SELECT invoice_id FROM invoices WHERE booking_id = $1 AND invoice_status != 'ยกเลิก' LIMIT 1`,
+            [id]
+        );
+        if (existInv.rows.length > 0) {
+            invoiceId = existInv.rows[0].invoice_id;
+        } else {
+            const today = new Date().toISOString().split("T")[0];
+            const invRes = await client.query(
+                `INSERT INTO invoices
+                    (booking_id, invoice_date, due_date, room_cost, water_cost, elec_cost, total_amount, invoice_status)
+                 VALUES ($1, $2, $2, $3, 0, 0, $3, 'ยังไม่ชำระ')
+                 RETURNING invoice_id`,
+                [id, today, total]
+            );
+            invoiceId = invRes.rows[0].invoice_id;
+            await client.query(
+                `INSERT INTO invoice_details (invoice_id, item_name, quantity, unit_price, subtotal)
+                 VALUES ($1, $2, $3, $4, $5)`,
+                [invoiceId, `ค่าห้องพักรายวัน (${nights} วัน)`, nights, bk.room_price, total]
+            );
+        }
+
+        // สร้าง payment row 'รอตรวจ' + charge Omise
+        const payRes = await client.query(
+            `INSERT INTO payments (invoice_id, payment_method, amount_paid, payment_status)
+             VALUES ($1, 'PromptPay QR', $2, 'รอตรวจ')
+             RETURNING payment_id`,
+            [invoiceId, total]
+        );
+        const paymentId = payRes.rows[0].payment_id;
+
+        const charge = await createPromptPayCharge(total, { payment_id: String(paymentId) });
+        await client.query(`UPDATE payments SET payment_evidence = $1 WHERE payment_id = $2`, [charge.chargeId, paymentId]);
+
+        await client.query("COMMIT");
+
+        res.status(201).json({
+            success: true,
+            data: { paymentId, invoiceId, chargeId: charge.chargeId, qrImage: charge.qrImage, amount: total },
+            message: "สร้าง QR สำหรับชำระค่าจองสำเร็จ",
+        });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("payBookingNow Error:", error.message);
+        res.status(400).json({ success: false, message: error.message });
+    } finally {
+        client.release();
     }
 };
 

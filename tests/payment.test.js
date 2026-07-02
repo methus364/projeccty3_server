@@ -339,3 +339,61 @@ test('omiseWebhook: charge ยังไม่จ่าย → ไม่ยืน
   assert.equal(res.body.success, true);
   assert.equal(calls.some((c) => has(c.sql, "UPDATE payments SET payment_status = 'ยืนยันแล้ว'")), false);
 });
+
+// ============================================================
+// payBookingNow — จ่ายค่าจองตอนจอง (แบบ Agoda, เฉพาะรายวัน)
+// ============================================================
+test('payBookingNow: รายวัน สถานะรอชำระ → 201 + สร้างบิล + QR', async () => {
+  setHandler((s) => {
+    const q = s.trim();
+    if (q.startsWith('BEGIN') || q.startsWith('COMMIT') || q.startsWith('ROLLBACK')) return { rows: [] };
+    if (has(q, 'FROM bookings b JOIN rooms r')) {
+      return { rows: [{ booking_id: 5, member_id: 2, rent_type: 'daily', booking_status: 'รอชำระมัดจำ',
+        check_in_date: '2026-07-01', check_out_date: '2026-07-04', room_price: 500 }] };
+    }
+    if (has(q, "invoice_status != 'ยกเลิก'")) return { rows: [] };       // ยังไม่มีบิลเดิม
+    if (q.startsWith('INSERT INTO invoices')) return { rows: [{ invoice_id: 88 }] };
+    if (q.startsWith('INSERT INTO payments')) return { rows: [{ payment_id: 91 }] };
+    return { rows: [] };
+  });
+  const req = { params: { id: 5 }, user: { id: 2, role: 'Monthly_Tenant' } };
+  const res = makeRes();
+  await payment.payBookingNow(req, res);
+
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.data.paymentId, 91);
+  assert.equal(res.body.data.amount, 1500);          // 3 วัน × 500
+  assert.equal(res.body.data.qrImage, 'https://omise/qr.png');
+});
+
+test('payBookingNow: รายเดือน → 400 (จ่ายตอนเช็คอิน)', async () => {
+  setHandler((s) => {
+    const q = s.trim();
+    if (q.startsWith('BEGIN') || q.startsWith('ROLLBACK')) return { rows: [] };
+    if (has(q, 'FROM bookings b JOIN rooms r')) {
+      return { rows: [{ booking_id: 6, member_id: 2, rent_type: 'monthly', booking_status: 'รอชำระมัดจำ',
+        check_in_date: '2026-07-01', check_out_date: '2026-08-01', room_price: 0 }] };
+    }
+    return { rows: [] };
+  });
+  const req = { params: { id: 6 }, user: { id: 2, role: 'Monthly_Tenant' } };
+  const res = makeRes();
+  await payment.payBookingNow(req, res);
+  assert.equal(res.statusCode, 400);
+});
+
+test('payBookingNow: การจองของคนอื่น → 403', async () => {
+  setHandler((s) => {
+    const q = s.trim();
+    if (q.startsWith('BEGIN') || q.startsWith('ROLLBACK')) return { rows: [] };
+    if (has(q, 'FROM bookings b JOIN rooms r')) {
+      return { rows: [{ booking_id: 5, member_id: 2, rent_type: 'daily', booking_status: 'รอชำระมัดจำ',
+        check_in_date: '2026-07-01', check_out_date: '2026-07-04', room_price: 500 }] };
+    }
+    return { rows: [] };
+  });
+  const req = { params: { id: 5 }, user: { id: 999, role: 'Monthly_Tenant' } };
+  const res = makeRes();
+  await payment.payBookingNow(req, res);
+  assert.equal(res.statusCode, 403);
+});
