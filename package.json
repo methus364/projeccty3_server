@@ -12,6 +12,7 @@
     "node-cron": "^4.5.0",
     "nodemailer": "^9.0.1",
     "nodemon": "^3.1.11",
+    "omise": "^1.1.0",
     "pdfmake": "^0.2.20",
     "pg": "^8.17.2",
     "promptpay-qr": "^0.5.0",

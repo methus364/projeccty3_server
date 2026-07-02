@@ -4,6 +4,7 @@ const { buildInvoicePdf } = require("../utils/invoicePdf");
 const { buildPromptpayQr } = require("../utils/promptpayQr");
 const { sendInvoiceMail } = require("../config/mailer");
 const { uploadSlip } = require("../config/supabase");
+const { createPromptPayCharge, retrieveCharge } = require("../config/omise");
 const { setAuditUser } = require("../utils/audit");
 
 // ==========================================
@@ -369,3 +370,210 @@ exports.getMyPayments = async (req, res) => {
         res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการดึงประวัติการชำระเงิน" });
     }
 };
+
+// ==========================================
+// Helper: ยืนยันการชำระ 1 รายการให้เป็น 'ยืนยันแล้ว' (ใช้ร่วมกันระหว่าง poll + webhook)
+// ทำใน transaction + idempotent (ถ้ายืนยันแล้วไม่ทำซ้ำ) + ออกใบเสร็จถ้าชำระครบ
+// คืน { status } = สถานะบิลล่าสุด
+// ==========================================
+async function confirmPaymentPaid(paymentId) {
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+
+        // ล็อก payment row กันยืนยันซ้ำพร้อมกัน (poll + webhook มาพร้อมกัน)
+        const payRes = await client.query(
+            `SELECT payment_id, invoice_id, payment_status FROM payments WHERE payment_id = $1 FOR UPDATE`,
+            [paymentId]
+        );
+        if (payRes.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return { status: null, notFound: true };
+        }
+        const pay = payRes.rows[0];
+
+        // ยืนยันไปแล้ว → ไม่ทำซ้ำ (idempotent)
+        if (pay.payment_status === "ยืนยันแล้ว") {
+            await client.query("ROLLBACK");
+            return { status: "ยืนยันแล้ว", already: true };
+        }
+
+        await client.query(`SELECT invoice_id FROM invoices WHERE invoice_id = $1 FOR UPDATE`, [pay.invoice_id]);
+        await client.query(`UPDATE payments SET payment_status = 'ยืนยันแล้ว' WHERE payment_id = $1`, [paymentId]);
+        const result = await recomputeInvoiceStatus(client, pay.invoice_id);
+        await client.query("COMMIT");
+
+        // ชำระครบ → ออกใบเสร็จ + ส่งอีเมล (best-effort หลัง commit)
+        if (result.status === "ชำระแล้ว") {
+            const fullInvoice = await _loadFullInvoice(pool, pay.invoice_id);
+            const payInfo = await pool.query(
+                `SELECT payment_id, payment_method, payment_date FROM payments WHERE payment_id = $1`,
+                [paymentId]
+            );
+            await emailReceipt(fullInvoice, payInfo.rows[0]);
+        }
+        return { status: result.status };
+    } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+    } finally {
+        client.release();
+    }
+}
+
+// ==========================================
+// 6. สร้าง QR PromptPay แบบยืนยันอัตโนมัติผ่าน Omise — Tenant/Admin
+//    POST /invoice/:id/qr-charge
+//    สร้าง charge + payment row (รอตรวจ) แล้วคืนรูป QR ให้สแกน
+// ==========================================
+exports.createQrCharge = async (req, res) => {
+    const client = await pool.connect();
+    const { id } = req.params;
+
+    try {
+        await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id);
+
+        // ล็อกบิล + โหลดข้อมูล
+        await client.query(`SELECT invoice_id FROM invoices WHERE invoice_id = $1 FOR UPDATE`, [id]);
+        const invoice = await _loadFullInvoice(client, id);
+        if (!invoice) throw new Error("ไม่พบใบแจ้งหนี้ที่ระบุ");
+
+        // Ownership: ผู้เช่าจ่ายได้เฉพาะบิลของตัวเอง
+        if (req.user.role !== "Admin" && invoice.member_id !== req.user.id) {
+            await client.query("ROLLBACK");
+            return res.status(403).json({ success: false, message: "ไม่มีสิทธิ์ชำระบิลนี้" });
+        }
+        if (invoice.invoice_status === "ชำระแล้ว") {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ success: false, message: "บิลนี้ชำระครบแล้ว" });
+        }
+
+        // คิดยอดคงเหลือที่ต้องจ่าย (ยอดบิล + ค่าปรับล่าช้า − ที่ยืนยันแล้ว)
+        const sumRes = await client.query(
+            `SELECT COALESCE(SUM(amount_paid), 0) AS paid_sum
+             FROM payments WHERE invoice_id = $1 AND payment_status = 'ยืนยันแล้ว'`,
+            [id]
+        );
+        const lateFee = invoice.invoice_status !== "ชำระแล้ว" ? _calculateLateFee(invoice.due_date) : 0;
+        const remaining = Number(invoice.total_amount) + lateFee - Number(sumRes.rows[0].paid_sum);
+        if (!(remaining > 0)) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ success: false, message: "ไม่มียอดค้างชำระสำหรับบิลนี้" });
+        }
+
+        // สร้าง payment row สถานะ 'รอตรวจ' ก่อน (จะได้ payment_id ไปแนบใน charge metadata)
+        const payRes = await client.query(
+            `INSERT INTO payments (invoice_id, payment_method, amount_paid, payment_status)
+             VALUES ($1, 'PromptPay QR', $2, 'รอตรวจ')
+             RETURNING payment_id`,
+            [id, remaining]
+        );
+        const paymentId = payRes.rows[0].payment_id;
+
+        // สร้าง charge กับ Omise (แนบ payment_id ไว้ match ตอนยืนยัน)
+        const charge = await createPromptPayCharge(remaining, { payment_id: String(paymentId) });
+
+        // เก็บ charge_id ไว้ใน payment_evidence เพื่อใช้ poll สถานะภายหลัง
+        await client.query(
+            `UPDATE payments SET payment_evidence = $1 WHERE payment_id = $2`,
+            [charge.chargeId, paymentId]
+        );
+
+        await client.query("COMMIT");
+
+        res.status(201).json({
+            success: true,
+            data: {
+                paymentId,
+                chargeId: charge.chargeId,
+                qrImage: charge.qrImage,
+                amount: remaining,
+            },
+            message: "สร้าง QR สำเร็จ กรุณาสแกนเพื่อชำระเงิน",
+        });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("createQrCharge Error:", error.message);
+        res.status(400).json({ success: false, message: error.message });
+    } finally {
+        client.release();
+    }
+};
+
+// ==========================================
+// 7. ตรวจสถานะการจ่าย QR (poll) — Tenant/Admin
+//    GET /payment/:id/qr-status
+//    ถาม Omise ว่า charge นี้จ่ายสำเร็จหรือยัง ถ้าจ่ายแล้ว → ยืนยันอัตโนมัติ
+// ==========================================
+exports.pollQrStatus = async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        // โหลด payment + เจ้าของ (เช็คสิทธิ์)
+        const payRes = await pool.query(
+            `SELECT p.payment_id, p.payment_status, p.payment_evidence, b.member_id
+             FROM payments p
+             JOIN invoices i ON p.invoice_id = i.invoice_id
+             JOIN bookings b ON i.booking_id = b.booking_id
+             WHERE p.payment_id = $1 LIMIT 1`,
+            [id]
+        );
+        if (payRes.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "ไม่พบรายการชำระเงิน" });
+        }
+        const pay = payRes.rows[0];
+
+        if (req.user.role !== "Admin" && pay.member_id !== req.user.id) {
+            return res.status(403).json({ success: false, message: "ไม่มีสิทธิ์เข้าถึงรายการนี้" });
+        }
+
+        // ยืนยันไปแล้ว → ตอบเลย
+        if (pay.payment_status === "ยืนยันแล้ว") {
+            return res.json({ success: true, data: { payment_status: "ยืนยันแล้ว", paid: true } });
+        }
+
+        // ถาม Omise ว่าจ่ายหรือยัง
+        const chargeId = pay.payment_evidence;
+        const charge = await retrieveCharge(chargeId);
+
+        if (charge.paid) {
+            const result = await confirmPaymentPaid(pay.payment_id);
+            return res.json({ success: true, data: { payment_status: "ยืนยันแล้ว", paid: true, invoice_status: result.status } });
+        }
+
+        res.json({ success: true, data: { payment_status: pay.payment_status, paid: false } });
+    } catch (error) {
+        console.error("pollQrStatus Error:", error.message);
+        res.status(400).json({ success: false, message: error.message });
+    }
+};
+
+// ==========================================
+// 8. Webhook รับ event จาก Omise — ไม่มี auth (Omise เรียกจากภายนอก)
+//    POST /payment/omise-webhook
+//    เมื่อ charge.complete + จ่ายสำเร็จ → ยืนยัน payment อัตโนมัติ (ใช้ตอน deploy จริง)
+// ==========================================
+exports.omiseWebhook = async (req, res) => {
+    try {
+        const event = req.body;
+        const charge = event?.data;
+
+        // สนใจเฉพาะ event ที่เป็น charge จ่ายสำเร็จ
+        const isPaidCharge = charge?.object === "charge" && charge?.status === "successful" && charge?.paid === true;
+        const paymentId = charge?.metadata?.payment_id;
+
+        if (isPaidCharge && paymentId) {
+            await confirmPaymentPaid(Number(paymentId));
+        }
+
+        // ตอบ 200 เสมอ เพื่อไม่ให้ Omise ส่งซ้ำ (การทำงานจริง idempotent อยู่แล้ว)
+        res.json({ success: true });
+    } catch (error) {
+        console.error("omiseWebhook Error:", error.message);
+        res.json({ success: true }); // ตอบ 200 กัน retry ถล่ม — log ไว้ตรวจเอง
+    }
+};
+
+// export helper เผื่อเขียน test
+exports._confirmPaymentPaid = confirmPaymentPaid;

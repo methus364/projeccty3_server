@@ -8,6 +8,9 @@ const {
     verifyPayment,
     getPayments,
     getMyPayments,
+    createQrCharge,
+    pollQrStatus,
+    omiseWebhook,
 } = require("../controllers/payment");
 const { authCheck, adminCheck } = require("../middleweres/authCheck");
 
@@ -39,5 +42,13 @@ router.post("/payment", authCheck, upload.single("slip"), createPayment);
 
 // Admin หรือเจ้าของบิล: ขอ QR PromptPay (ownership check อยู่ใน controller)
 router.get("/invoice/:id/promptpay", authCheck, getPromptpayQr);
+
+// --- ชำระผ่าน QR อัตโนมัติ (Omise) ---
+// Tenant/Admin: สร้าง QR charge สำหรับบิลนั้น
+router.post("/invoice/:id/qr-charge", authCheck, createQrCharge);
+// Tenant/Admin: poll ว่าจ่าย QR สำเร็จหรือยัง (ยืนยันอัตโนมัติ)
+router.get("/payment/:id/qr-status", authCheck, pollQrStatus);
+// Webhook จาก Omise (ไม่มี auth — เรียกจากภายนอก)
+router.post("/payment/omise-webhook", omiseWebhook);
 
 module.exports = router;

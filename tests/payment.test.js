@@ -35,6 +35,13 @@ injectMock('utils/invoicePdf.js', { buildInvoicePdf: async () => Buffer.from('pd
 injectMock('utils/promptpayQr.js', { buildPromptpayQr: async (amt) => ({ dataUrl: 'data:img', promptpayId: '0812345678', amount: amt }) });
 injectMock('config/supabase.js', { uploadSlip: async () => 'https://supabase/slip.jpg' });
 
+// mock Omise — คุมผลลัพธ์การสร้าง QR + สถานะการจ่าย
+let omiseChargePaid = false; // ปรับในแต่ละเทสว่า charge จ่ายแล้วหรือยัง
+injectMock('config/omise.js', {
+  createPromptPayCharge: async (amount) => ({ chargeId: 'chrg_test_1', qrImage: 'https://omise/qr.png', amount, status: 'pending' }),
+  retrieveCharge: async () => ({ status: omiseChargePaid ? 'successful' : 'pending', paid: omiseChargePaid }),
+});
+
 const payment = require('../controllers/payment');
 
 // ---------- helpers ----------
@@ -222,4 +229,113 @@ test('getMyPayments: คืนเฉพาะของตัวเอง', async
   // ยืนยันว่ากรองด้วย id ของผู้ล็อกอิน
   const p = paramsOf('WHERE b.member_id');
   assert.equal(p[0], 2);
+});
+
+// ============================================================
+// createQrCharge — จ่ายด้วย QR อัตโนมัติ (Omise)
+// ============================================================
+test('createQrCharge: บิลของตัวเอง → 201 + คืน qrImage + สร้าง payment row', async () => {
+  setHandler((s) => {
+    const q = s.trim();
+    if (q.startsWith('BEGIN') || q.startsWith('COMMIT') || q.startsWith('ROLLBACK')) return { rows: [] };
+    if (has(q, 'FROM invoices i')) return { rows: [fullInvoiceHeader] };            // _loadFullInvoice
+    if (has(q, "payment_status = 'ยืนยันแล้ว'")) return { rows: [{ paid_sum: 0 }] }; // ยอดที่จ่ายแล้ว
+    if (q.startsWith('INSERT INTO payments')) return { rows: [{ payment_id: 90 }] };
+    return { rows: [] };
+  });
+  const req = { params: { id: 77 }, user: { id: 2, role: 'Monthly_Tenant' } };
+  const res = makeRes();
+  await payment.createQrCharge(req, res);
+
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.data.paymentId, 90);
+  assert.equal(res.body.data.qrImage, 'https://omise/qr.png');
+});
+
+test('createQrCharge: บิลของคนอื่น → 403', async () => {
+  setHandler((s) => {
+    const q = s.trim();
+    if (has(q, 'FROM invoices i')) return { rows: [fullInvoiceHeader] }; // member_id = 2
+    return { rows: [] };
+  });
+  const req = { params: { id: 77 }, user: { id: 999, role: 'Monthly_Tenant' } };
+  const res = makeRes();
+  await payment.createQrCharge(req, res);
+  assert.equal(res.statusCode, 403);
+});
+
+// ============================================================
+// pollQrStatus — poll ว่าจ่าย QR สำเร็จหรือยัง
+// ============================================================
+test('pollQrStatus: ยังไม่จ่าย → paid=false', async () => {
+  omiseChargePaid = false;
+  setHandler((s) => {
+    const q = s.trim();
+    if (has(q, 'FROM payments p') && has(q, 'JOIN invoices i')) {
+      return { rows: [{ payment_id: 90, payment_status: 'รอตรวจ', payment_evidence: 'chrg_test_1', member_id: 2 }] };
+    }
+    return { rows: [] };
+  });
+  const req = { params: { id: 90 }, user: { id: 2, role: 'Monthly_Tenant' } };
+  const res = makeRes();
+  await payment.pollQrStatus(req, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.data.paid, false);
+});
+
+test('pollQrStatus: จ่ายแล้ว → ยืนยันอัตโนมัติ + paid=true', async () => {
+  omiseChargePaid = true;
+  setHandler((s) => {
+    const q = s.trim();
+    if (q.startsWith('BEGIN') || q.startsWith('COMMIT') || q.startsWith('ROLLBACK')) return { rows: [] };
+    // โหลด payment + เจ้าของ (query ตอน poll)
+    if (has(q, 'FROM payments p') && has(q, 'JOIN invoices i')) {
+      return { rows: [{ payment_id: 90, payment_status: 'รอตรวจ', payment_evidence: 'chrg_test_1', member_id: 2 }] };
+    }
+    // ล็อก payment row ใน confirmPaymentPaid
+    if (has(q, 'SELECT payment_id, invoice_id, payment_status FROM payments')) {
+      return { rows: [{ payment_id: 90, invoice_id: 77, payment_status: 'รอตรวจ' }] };
+    }
+    if (has(q, 'SELECT total_amount FROM invoices')) return { rows: [{ total_amount: 5400 }] };
+    if (has(q, "payment_status = 'ยืนยันแล้ว'")) return { rows: [{ paid_sum: 5400 }] };
+    if (has(q, 'FROM invoices i')) return { rows: [fullInvoiceHeader] };
+    return { rows: [] };
+  });
+  const req = { params: { id: 90 }, user: { id: 2, role: 'Monthly_Tenant' } };
+  const res = makeRes();
+  await payment.pollQrStatus(req, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.data.paid, true);
+  assert.ok(calls.some((c) => has(c.sql, "UPDATE payments SET payment_status = 'ยืนยันแล้ว'")));
+});
+
+// ============================================================
+// omiseWebhook — รับ event จาก Omise
+// ============================================================
+test('omiseWebhook: charge จ่ายสำเร็จ + มี payment_id → ยืนยัน payment', async () => {
+  setHandler((s) => {
+    const q = s.trim();
+    if (q.startsWith('BEGIN') || q.startsWith('COMMIT') || q.startsWith('ROLLBACK')) return { rows: [] };
+    if (has(q, 'SELECT payment_id, invoice_id, payment_status FROM payments')) {
+      return { rows: [{ payment_id: 90, invoice_id: 77, payment_status: 'รอตรวจ' }] };
+    }
+    if (has(q, 'SELECT total_amount FROM invoices')) return { rows: [{ total_amount: 5400 }] };
+    if (has(q, "payment_status = 'ยืนยันแล้ว'")) return { rows: [{ paid_sum: 5400 }] };
+    if (has(q, 'FROM invoices i')) return { rows: [fullInvoiceHeader] };
+    return { rows: [] };
+  });
+  const req = { body: { data: { object: 'charge', status: 'successful', paid: true, metadata: { payment_id: '90' } } } };
+  const res = makeRes();
+  await payment.omiseWebhook(req, res);
+  assert.equal(res.body.success, true);
+  assert.ok(calls.some((c) => has(c.sql, "UPDATE payments SET payment_status = 'ยืนยันแล้ว'")));
+});
+
+test('omiseWebhook: charge ยังไม่จ่าย → ไม่ยืนยัน', async () => {
+  setHandler(() => ({ rows: [] }));
+  const req = { body: { data: { object: 'charge', status: 'pending', paid: false, metadata: { payment_id: '90' } } } };
+  const res = makeRes();
+  await payment.omiseWebhook(req, res);
+  assert.equal(res.body.success, true);
+  assert.equal(calls.some((c) => has(c.sql, "UPDATE payments SET payment_status = 'ยืนยันแล้ว'")), false);
 });
