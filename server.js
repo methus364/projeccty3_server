@@ -14,10 +14,14 @@ const allowedOrigins = [
   'http://localhost:8080',
 ].filter(Boolean);
 
+// dev: อนุญาต localhost/127.0.0.1 ทุกพอร์ต (Vite อาจเด้งพอร์ต 5174 ถ้า 5173 ไม่ว่าง)
+const isLocalhostOrigin = (origin) =>
+  /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+
 const corsOptions = {
   origin: (origin, callback) => {
     // origin = undefined หมายถึง mobile app หรือ server-to-server → อนุญาต
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin || isLocalhostOrigin(origin) || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));

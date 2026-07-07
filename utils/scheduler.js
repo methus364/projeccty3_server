@@ -57,8 +57,9 @@ function startMonthlyBillingCron() {
 
 // ============================================================
 // Cron ยกเลิกการจองที่หมดเวลาล็อกห้อง — รันทุก 1 นาที (USER_FLOWS ข้อ 8)
-// ยกเลิก booking ที่ 'รอชำระมัดจำ' + เลย hold_expires_at + ยังไม่มีสลิป/การชำระส่งเข้ามาเลย
-//   → เปลี่ยนสถานะเป็น 'ยกเลิก' (ไม่ลบแถว), คืนห้องว่าง, ยกเลิกบิลมัดจำที่ค้าง
+// booking ที่ 'รอชำระมัดจำ' + เลย hold_expires_at + ยังไม่มีสลิป/การชำระส่งเข้ามาเลย
+//   → ลบทิ้งทั้งแถว (booking + บิล + รายละเอียดบิลที่ผูกกัน) ให้หายจากประวัติทั้ง user และ admin
+//   + คืนห้องว่าง
 // (booking ที่ส่งสลิปแล้วจะถูกเคลียร์ hold + เป็น 'ยืนยันการจอง' ตั้งแต่ตอน createPayment)
 // ============================================================
 async function cancelExpiredHolds() {
@@ -76,33 +77,33 @@ async function cancelExpiredHolds() {
            )`
     );
 
-    // ยกเลิกทีละรายการใน transaction ของตัวเอง
+    // ลบทีละรายการใน transaction ของตัวเอง (ลบตารางลูกก่อนตามลำดับ FK)
     for (const row of expiredRes.rows) {
         const client = await pool.connect();
         try {
             await client.query("BEGIN");
+            // 1) ลบรายละเอียดบิล + บิล ที่ผูกกับ booking นี้ (ยังไม่มี payment แน่นอนจากเงื่อนไขข้างบน)
             await client.query(
-                `UPDATE bookings SET booking_status = 'ยกเลิก', hold_expires_at = NULL WHERE booking_id = $1`,
+                `DELETE FROM invoice_details
+                 WHERE invoice_id IN (SELECT invoice_id FROM invoices WHERE booking_id = $1)`,
                 [row.booking_id]
             );
+            await client.query(`DELETE FROM invoices WHERE booking_id = $1`, [row.booking_id]);
+            // 2) ลบตัว booking ทิ้ง
+            await client.query(`DELETE FROM bookings WHERE booking_id = $1`, [row.booking_id]);
+            // 3) คืนห้องว่าง
             await client.query(`UPDATE rooms SET room_status = 'ว่าง' WHERE room_id = $1`, [row.room_id]);
-            // ยกเลิกบิลมัดจำที่ยังค้างอยู่ของ booking นี้ (ถ้ามี)
-            await client.query(
-                `UPDATE invoices SET invoice_status = 'ยกเลิก'
-                 WHERE booking_id = $1 AND invoice_status != 'ชำระแล้ว'`,
-                [row.booking_id]
-            );
             await client.query("COMMIT");
         } catch (err) {
             await client.query("ROLLBACK");
-            console.error(`[cron] ยกเลิก booking ${row.booking_id} ไม่สำเร็จ:`, err.message);
+            console.error(`[cron] ลบการจองหมดเวลา ${row.booking_id} ไม่สำเร็จ:`, err.message);
         } finally {
             client.release();
         }
     }
 
     if (expiredRes.rows.length > 0) {
-        console.log(`[cron] ยกเลิกการจองที่หมดเวลาล็อกห้อง ${expiredRes.rows.length} รายการ`);
+        console.log(`[cron] ลบการจองที่หมดเวลาล็อกห้อง ${expiredRes.rows.length} รายการ`);
     }
 }
 

@@ -118,7 +118,10 @@ exports.createBooking = async (req, res) => {
         await client.query("COMMIT");
 
         const bookingId = bookingRes.rows[0].booking_id;
-        const holdExpiresAt = bookingRes.rows[0].hold_expires_at;
+        // คำนวณเวลาหมดอายุ hold ใน JS (เวลาปัจจุบัน + 5 นาที) เป็น ISO UTC ตรงๆ
+        // ไม่อ่านค่า timestamp จาก DB กลับมา เพราะคอลัมน์เป็น timestamp without time zone
+        // ทำให้ node-pg ตีความเป็นเวลาท้องถิ่น (เลื่อน TZ) → countdown ฝั่ง frontend เพี้ยนเป็นหมดเวลาทันที
+        const holdExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
         const bookingRef = formatBookingRef(bookingId);
 
         // ส่งอีเมลยืนยันการจอง (หลัง COMMIT — ทำนอก transaction)
@@ -195,6 +198,8 @@ exports.checkbooking = async (req, res) => {
             FROM bookings b
             JOIN rooms r ON b.room_id = r.room_id
             WHERE b.member_id = $1
+              -- ไม่โชว์รายการที่ยังไม่ชำระ (รอชำระมัดจำ) หรือถูกยกเลิก — ประวัติมีเฉพาะการจองที่ชำระแล้ว/ใช้งานจริง
+              AND b.booking_status NOT IN ('รอชำระมัดจำ', 'ยกเลิก')
             ORDER BY b.booking_date DESC
         `;
 

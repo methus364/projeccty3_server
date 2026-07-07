@@ -229,16 +229,20 @@ exports.createPayment = async (req, res) => {
 
         // 4.5 มีสลิป/การชำระส่งเข้ามาแล้ว → หยุดนาฬิกา hold + ยืนยันการจองทันที (ไม่รอ verify)
         //     ป้องกัน cron ยกเลิก booking ที่ส่งสลิปแล้ว (USER_FLOWS ข้อ 7)
-        await client.query(
+        const bookingUpdate = await client.query(
             `UPDATE bookings SET booking_status = 'ยืนยันการจอง', hold_expires_at = NULL
              WHERE booking_id = (SELECT booking_id FROM invoices WHERE invoice_id = $1)
-               AND booking_status = 'รอชำระมัดจำ'`,
+               AND booking_status = 'รอชำระมัดจำ'
+             RETURNING booking_id`,
             [invoice_id]
         );
+        // การชำระนี้ทำให้การจอง (รายวัน) เปลี่ยนจากรอชำระ → ยืนยันการจองหรือไม่
+        const bookingConfirmed = bookingUpdate.rowCount > 0;
 
-        // 5. ถ้ายืนยันทันที (เงินสด) → อัปเดตสถานะบิล + ออกใบเสร็จถ้าชำระครบ
+        // 5. ออกใบเสร็จ
         let receiptMsg = "";
         if (isCashByAdmin) {
+            // เงินสด (admin) → คิดสถานะบิล + ออกใบเสร็จถ้าชำระครบ
             const result = await recomputeInvoiceStatus(client, invoice_id);
             await client.query("COMMIT");
             if (result.status === "ชำระแล้ว") {
@@ -248,12 +252,24 @@ exports.createPayment = async (req, res) => {
             }
         } else {
             await client.query("COMMIT");
+            // ลูกค้าอัปสลิปแล้วการจองถูกยืนยัน → ออกใบเสร็จ + รายละเอียดการจอง ส่งอีเมลกลับทันที
+            if (bookingConfirmed) {
+                const fullInvoice = await _loadFullInvoice(pool, invoice_id);
+                const mail = await emailReceipt(fullInvoice, payment);
+                receiptMsg = " " + mail.message;
+            }
         }
 
         res.status(201).json({
             success: true,
             data: payment,
-            message: (isCashByAdmin ? "บันทึกการชำระเงินสำเร็จ" : "แจ้งชำระเงินสำเร็จ รอแอดมินตรวจสอบ") + receiptMsg,
+            bookingConfirmed,
+            // ยืนยันการจองแล้ว → บอกว่าออกใบเสร็จให้ · บิลอื่น (เช่นรายเดือน) → รอแอดมินตรวจ
+            message: isCashByAdmin
+                ? "บันทึกการชำระเงินสำเร็จ" + receiptMsg
+                : (bookingConfirmed
+                    ? "ชำระเงินสำเร็จ ยืนยันการจองและออกใบเสร็จให้แล้ว" + receiptMsg
+                    : "แจ้งชำระเงินสำเร็จ รอแอดมินตรวจสอบ"),
         });
 
     } catch (error) {
