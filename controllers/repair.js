@@ -1,10 +1,11 @@
 const pool = require("../config/db");
+const { uploadFile } = require("../config/supabase");
 
 // ==========================================
-// 1. Tenant แจ้งซ่อม (createRepair)
+// 1. Tenant แจ้งซ่อม (createRepair) — multipart (แนบรูป/วิดีโอได้หลายไฟล์)
 // ==========================================
 exports.createRepair = async (req, res) => {
-    const { booking_id, problem_title, problem_details } = req.body;
+    const { booking_id, problem_title, problem_details, preferred_time } = req.body;
     const memberId = req.user.id;
 
     if (!booking_id || !problem_title) {
@@ -26,10 +27,21 @@ exports.createRepair = async (req, res) => {
         });
     }
 
+    // อัปโหลดไฟล์แนบทั้งหมด (รูป+วิดีโอ) ขึ้น Supabase → เก็บเป็น array ของ URL
+    let mediaUrls = null;
+    if (req.files && req.files.length > 0) {
+        const urls = [];
+        for (const file of req.files) {
+            const url = await uploadFile(file.buffer, file.originalname, file.mimetype, "repair");
+            urls.push(url);
+        }
+        mediaUrls = urls;
+    }
+
     const result = await pool.query(
-        `INSERT INTO maintenance_requests (booking_id, problem_title, problem_details)
-         VALUES ($1, $2, $3) RETURNING *`,
-        [booking_id, problem_title, problem_details || null]
+        `INSERT INTO maintenance_requests (booking_id, problem_title, problem_details, preferred_time, media_urls)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [booking_id, problem_title, problem_details || null, preferred_time || null, mediaUrls]
     );
 
     res.status(201).json({ success: true, data: result.rows[0], message: 'แจ้งซ่อมสำเร็จ' });
@@ -45,6 +57,8 @@ exports.getAllRepairs = async (req, res) => {
             mr.booking_id,
             mr.problem_title,
             mr.problem_details,
+            mr.preferred_time,
+            mr.media_urls,
             mr.reported_date,
             mr.status,
             r.room_number,
@@ -77,7 +91,7 @@ exports.getMyRepairs = async (req, res) => {
     }
 
     const result = await pool.query(
-        `SELECT repair_id, problem_title, problem_details, reported_date, status
+        `SELECT repair_id, problem_title, problem_details, preferred_time, media_urls, reported_date, status
          FROM maintenance_requests
          WHERE booking_id = $1
          ORDER BY reported_date DESC`,

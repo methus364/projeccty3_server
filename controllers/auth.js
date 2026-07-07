@@ -134,11 +134,19 @@ exports.getMemberById = async (req, res) => {
   }
 };
 
+// role ที่ระบบรู้จัก — ต้องตรงกับที่ authCheck.js ใช้เช็คสิทธิ์ทุกที่ (Admin/tenantCheck/monthlyTenantCheck)
+const VALID_ROLES = ["Admin", "Daily_Tenant", "Monthly_Tenant"];
+
 // --- Update Member (Admin) ---
 exports.updateMember = async (req, res) => {
   try {
     const { id } = req.params;
     const { full_name, email, phone_number, user_role } = req.body;
+
+    // กันตั้ง user_role เป็นค่าที่ระบบไม่รู้จัก — พิมพ์ผิด/ค่าแปลกจะทำให้ user คนนั้นหลุดจากทุก role check ทันที
+    if (user_role !== undefined && !VALID_ROLES.includes(user_role)) {
+      return res.status(400).json({ success: false, message: `user_role ต้องเป็นหนึ่งใน ${VALID_ROLES.join(", ")}` });
+    }
 
     const cur = await pool.query('SELECT * FROM members WHERE member_id = $1 LIMIT 1', [id]);
     if (!cur.rows[0]) return res.status(404).json({ success: false, message: "ไม่พบสมาชิก" });

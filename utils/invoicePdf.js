@@ -48,7 +48,9 @@ function buildInvoicePdf(invoice, mode = "invoice") {
 
     // 1. หัวเอกสาร + เลขที่
     const year = new Date(invoice.invoice_date || Date.now()).getFullYear();
-    const docTitle = isReceipt ? "ใบเสร็จรับเงิน" : "ใบแจ้งหนี้";
+    // ชื่อเอกสารใบเสร็จ: ใช้ชื่อเฉพาะที่ส่งมา (receipt_title) ถ้ามี ไม่งั้นใช้ค่ากลาง
+    // เช่น "ใบเสร็จจองห้องรายวัน" / "ใบเสร็จมัดจำการเช่าห้องพักรายเดือน" / "ใบเสร็จจ่ายค่าห้องรายเดือน" (USER_FLOWS)
+    const docTitle = isReceipt ? (invoice.receipt_title || "ใบเสร็จรับเงิน") : "ใบแจ้งหนี้";
     // ใบเสร็จใช้เลข payment_id (ถ้ามี), ใบแจ้งหนี้ใช้ invoice_id
     const receiptRefId = invoice.payment_id || invoice.invoice_id;
     const docNumber = isReceipt

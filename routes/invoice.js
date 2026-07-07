@@ -9,12 +9,14 @@ const {
     getInvoicePdf,
     updateInvoice,
     sendInvoiceEmail,
+    sendInvoiceBatch,
     generateMonthly,
 } = require("../controllers/invoice");
 const { authCheck, adminCheck } = require("../middleweres/authCheck");
 
-// ออกบิลรายเดือนยกชุด (ต้องวางก่อน '/invoice/:id' กัน path ชนกัน)
+// ออกบิลรายเดือนยกชุด / ส่งอีเมลยกชุด (ต้องวางก่อน '/invoice/:id' กัน path ชนกัน)
 router.post("/invoices/generate-monthly", authCheck, adminCheck, generateMonthly);
+router.post("/invoices/send-batch", authCheck, adminCheck, sendInvoiceBatch);
 
 // Tenant: ดูบิลของตัวเอง
 router.get("/my-invoices", authCheck, getMyInvoices);

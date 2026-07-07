@@ -59,6 +59,19 @@ exports.getSummary = async (req, res) => {
              WHERE status <> 'done'`
         );
 
+        // --- 1.5 ห้องรายเดือนที่ยังไม่จดมิเตอร์เดือนนี้ (เตือนก่อนออกบิล) ---
+        const meterRes = await pool.query(
+            `SELECT COUNT(*) AS unrecorded
+             FROM bookings b
+             JOIN rooms r ON b.room_id = r.room_id
+             WHERE b.rent_type = 'monthly' AND b.booking_status = 'กำลังเข้าพัก'
+               AND NOT EXISTS (
+                   SELECT 1 FROM utility_meters um
+                   WHERE um.room_id = r.room_id
+                     AND um.record_month = to_char(CURRENT_DATE, 'YYYY-MM')
+               )`
+        );
+
         res.json({
             success: true,
             data: {
@@ -67,6 +80,7 @@ exports.getSummary = async (req, res) => {
                 outstandingDebt: Number(debtRes.rows[0].outstanding),
                 unpaidInvoices: Number(debtRes.rows[0].unpaid_count),
                 pendingRepairs: Number(repairRes.rows[0].pending_repairs),
+                unrecordedMeters: Number(meterRes.rows[0]?.unrecorded || 0),
             },
         });
     } catch (error) {

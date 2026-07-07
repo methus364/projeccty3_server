@@ -77,8 +77,9 @@ async function computeInvoice(db, booking, month) {
     const meter = meterRes.rows[0] || {};
     const hasWater = meter.curr_water != null && meter.prev_water != null;
     const hasElec  = meter.curr_elec  != null && meter.prev_elec  != null;
-    const waterUnits = hasWater ? meter.curr_water - meter.prev_water : 0;
-    const elecUnits  = hasElec  ? meter.curr_elec  - meter.prev_elec  : 0;
+    // กันติดลบ: ถ้ามิเตอร์ถูกรีเซ็ต (curr น้อยกว่า prev จากการ override) ห้ามคิดหน่วยติดลบ ให้นับเป็น 0 หน่วยแทน
+    const waterUnits = hasWater ? Math.max(0, meter.curr_water - meter.prev_water) : 0;
+    const elecUnits  = hasElec  ? Math.max(0, meter.curr_elec  - meter.prev_elec)  : 0;
     // ค่าน้ำคิดขั้นต่ำ: ถ้ามีมิเตอร์แล้วคิดตามหน่วยได้ต่ำกว่าขั้นต่ำ → ใช้ค่าขั้นต่ำแทน
     const waterByUnit = waterUnits * WATER_RATE;
     const waterCost = hasWater ? Math.max(waterByUnit, WATER_MINIMUM) : 0;
@@ -108,7 +109,7 @@ async function loadFullInvoice(db, invoiceId) {
         `SELECT
             i.invoice_id, i.booking_id, i.invoice_date, i.due_date,
             i.room_cost, i.water_cost, i.elec_cost, i.total_amount, i.invoice_status,
-            b.member_id,
+            b.member_id, b.rent_type,
             m.full_name AS guest_name,
             m.email     AS guest_email,
             r.room_number
@@ -177,14 +178,15 @@ exports.createInvoice = async (req, res) => {
         await client.query("BEGIN");
         await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
-        // 1. โหลดข้อมูลการจอง + ห้อง
+        // 1. โหลดข้อมูลการจอง + ห้อง — ล็อกแถว booking ไว้ก่อน (FOR UPDATE) กันสอง request ออกบิลซ้ำให้ booking+เดือนเดียวกันพร้อมกัน
         const bookingRes = await client.query(
             `SELECT b.booking_id, b.room_id, b.member_id, b.rent_type,
                     b.check_in_date, b.check_out_date,
                     r.room_price, r.price_monthly
              FROM bookings b
              JOIN rooms r ON b.room_id = r.room_id
-             WHERE b.booking_id = $1`,
+             WHERE b.booking_id = $1
+             FOR UPDATE OF b`,
             [booking_id]
         );
         if (bookingRes.rows.length === 0) throw new Error("ไม่พบการจองที่ระบุ");
@@ -231,14 +233,13 @@ exports.createInvoice = async (req, res) => {
 
         await client.query("COMMIT");
 
-        // 7. หลัง commit: ส่งอีเมลแนบ PDF (ไม่ให้ล้มถ้าอีเมลพัง)
+        // 7. หลัง commit: ไม่ส่งอีเมลอัตโนมัติ — Admin ต้องตรวจยอด/รายการก่อน แล้วกด "ส่งอีเมล" เอง (USER_FLOWS)
         const fullInvoice = await loadFullInvoice(pool, invoiceId);
-        const mailResult = await emailInvoice(fullInvoice);
 
         res.status(201).json({
             success: true,
             data: fullInvoice,
-            message: "ออกใบแจ้งหนี้สำเร็จ" + (mailResult.sent ? " และส่งอีเมลแล้ว" : ` (${mailResult.message})`),
+            message: "ออกใบแจ้งหนี้สำเร็จ (ยังไม่ส่งอีเมล — กรุณาตรวจสอบแล้วกดส่ง)",
         });
 
     } catch (error) {
@@ -275,7 +276,7 @@ exports.getInvoices = async (req, res) => {
         const result = await pool.query(
             `SELECT
                 i.invoice_id, i.booking_id, i.invoice_date, i.due_date,
-                i.room_cost, i.water_cost, i.elec_cost, i.total_amount, i.invoice_status,
+                i.room_cost, i.water_cost, i.elec_cost, i.total_amount, i.invoice_status, i.sent_at,
                 m.full_name   AS guest_name,
                 r.room_number
              FROM invoices i
@@ -491,6 +492,8 @@ exports.sendInvoiceEmail = async (req, res) => {
         if (!result.sent) {
             return res.status(400).json({ success: false, message: result.message });
         }
+        // ส่งสำเร็จ → บันทึกเวลาส่ง (แยกจากสถานะการจ่ายเงิน)
+        await pool.query(`UPDATE invoices SET sent_at = CURRENT_TIMESTAMP WHERE invoice_id = $1`, [id]);
         res.json({ success: true, message: result.message });
     } catch (error) {
         console.error("sendInvoiceEmail Error:", error.message);
@@ -513,7 +516,7 @@ exports.generateMonthly = async (req, res) => {
         const targetsRes = await pool.query(
             `SELECT b.booking_id, b.room_id, b.member_id, b.rent_type,
                     b.check_in_date, b.check_out_date,
-                    r.room_price, r.price_monthly
+                    r.room_price, r.price_monthly, r.room_number
              FROM bookings b
              JOIN rooms r ON b.room_id = r.room_id
              WHERE b.rent_type = 'monthly'
@@ -528,13 +531,41 @@ exports.generateMonthly = async (req, res) => {
         );
 
         const created = [];
+        const skipped = []; // ห้องที่ข้ามเพราะยังไม่จดมิเตอร์เดือนนี้ (กันคิดค่าน้ำ/ไฟเป็น 0)
 
         // ออกบิลทีละการจอง (แต่ละบิลเป็น transaction ของตัวเอง)
         for (const booking of targetsRes.rows) {
+            // ข้ามห้องที่ยังไม่จดมิเตอร์เดือนนี้ — ไม่ออกบิลให้ (กันคิดค่าน้ำ/ไฟผิดเป็น 0 บาทเงียบๆ)
+            const meterCheck = await pool.query(
+                `SELECT 1 FROM utility_meters WHERE room_id = $1 AND record_month = $2 LIMIT 1`,
+                [booking.room_id, month]
+            );
+            if (meterCheck.rows.length === 0) {
+                skipped.push(booking.room_number);
+                continue;
+            }
+
             const client = await pool.connect();
             try {
                 await client.query("BEGIN");
         await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
+
+                // ล็อกแถว booking ไว้ก่อน (FOR UPDATE) กันชนกับ createInvoice หรือ generateMonthly อีกรอบที่รันพร้อมกัน
+                await client.query(`SELECT booking_id FROM bookings WHERE booking_id = $1 FOR UPDATE`, [booking.booking_id]);
+
+                // เช็คซ้ำอีกครั้งหลังล็อก (targetsRes ด้านบนคิดไว้ก่อนล็อก อาจมีรายการที่เพิ่งถูกออกบิลไปแล้วระหว่างนี้)
+                const dupRes = await client.query(
+                    `SELECT invoice_id FROM invoices
+                     WHERE booking_id = $1
+                       AND to_char(invoice_date, 'YYYY-MM') = $2
+                       AND invoice_status != 'ยกเลิก'
+                     LIMIT 1`,
+                    [booking.booking_id, month]
+                );
+                if (dupRes.rows.length > 0) {
+                    throw new Error(`มีใบแจ้งหนี้ของการจองนี้ในเดือน ${month} อยู่แล้ว`);
+                }
+
                 const calc = await computeInvoice(client, booking, month);
 
                 const invRes = await client.query(
@@ -556,9 +587,7 @@ exports.generateMonthly = async (req, res) => {
 
                 await client.query("COMMIT");
 
-                // ส่งอีเมลแนบ PDF (best-effort)
-                const fullInvoice = await loadFullInvoice(pool, invoiceId);
-                await emailInvoice(fullInvoice);
+                // ไม่ส่งอีเมลอัตโนมัติ — Admin ตรวจแล้วกดส่งเองทีหลัง (USER_FLOWS)
                 created.push(invoiceId);
             } catch (err) {
                 await client.query("ROLLBACK");
@@ -568,17 +597,57 @@ exports.generateMonthly = async (req, res) => {
             }
         }
 
+        const skipMsg = skipped.length > 0 ? ` · ข้าม ${skipped.length} ห้องที่ยังไม่จดมิเตอร์: ${skipped.join(", ")}` : "";
         res.status(201).json({
             success: true,
             count: created.length,
             data: created,
-            message: `ออกบิลรายเดือนสำเร็จ ${created.length} ใบ สำหรับเดือน ${month}`,
+            skipped,
+            message: `ออกบิลรายเดือนสำเร็จ ${created.length} ใบ สำหรับเดือน ${month}${skipMsg}`,
         });
 
     } catch (error) {
         console.error("generateMonthly Error:", error.message);
         res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการออกบิลรายเดือน" });
     }
+};
+
+// ==========================================
+// 8. ส่งอีเมลบิลหลายใบพร้อมกัน (sendInvoiceBatch) — Admin
+//    POST /invoices/send-batch  body: { invoice_ids: [] }
+//    ใช้กับปุ่ม "ส่งทั้งหมด" หลัง gen รายเดือน
+// ==========================================
+exports.sendInvoiceBatch = async (req, res) => {
+    const ids = req.body.invoice_ids;
+    if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ success: false, message: "กรุณาระบุ invoice_ids (array)" });
+    }
+
+    const sent = [];
+    const failed = [];
+    for (const id of ids) {
+        try {
+            const invoice = await loadFullInvoice(pool, id);
+            if (!invoice) { failed.push(id); continue; }
+            const result = await emailInvoice(invoice);
+            if (result.sent) {
+                await pool.query(`UPDATE invoices SET sent_at = CURRENT_TIMESTAMP WHERE invoice_id = $1`, [id]);
+                sent.push(id);
+            } else {
+                failed.push(id);
+            }
+        } catch (err) {
+            console.error(`ส่งบิล ${id} ไม่สำเร็จ:`, err.message);
+            failed.push(id);
+        }
+    }
+
+    res.json({
+        success: true,
+        sent,
+        failed,
+        message: `ส่งอีเมลสำเร็จ ${sent.length} ใบ` + (failed.length > 0 ? ` · ล้มเหลว ${failed.length} ใบ` : ""),
+    });
 };
 
 // export helpers เพื่อให้ controller อื่น (เช่น booking checkIn, payment) reuse ได้

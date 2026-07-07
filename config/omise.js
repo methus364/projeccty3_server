@@ -57,12 +57,17 @@ async function createPromptPayCharge(amountBaht, metadata) {
     };
 }
 
-// ดึงสถานะ charge ล่าสุดจาก Omise (ใช้ตอน poll ว่าจ่ายสำเร็จหรือยัง)
-// คืน { status, paid } — paid=true เมื่อจ่ายเงินสำเร็จแล้ว
+// ดึงสถานะ charge ล่าสุดจาก Omise (ใช้ตอน poll + webhook ว่าจ่ายสำเร็จหรือยัง)
+// คืน { status, paid, metadata } — paid=true เมื่อจ่ายเงินสำเร็จแล้ว
+// สำคัญ: metadata คืนจาก Omise เอง (ยืนยันด้วย secret key ของเรา) ไม่ใช่ metadata ที่แนบมาจาก webhook body ตรงๆ (ปลอมได้)
 async function retrieveCharge(chargeId) {
     const omise = getOmise();
     const charge = await omise.charges.retrieve(chargeId);
-    return { status: charge.status, paid: charge.paid === true && charge.status === "successful" };
+    return {
+        status: charge.status,
+        paid: charge.paid === true && charge.status === "successful",
+        metadata: charge.metadata || {},
+    };
 }
 
 module.exports = { createPromptPayCharge, retrieveCharge };

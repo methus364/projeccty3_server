@@ -23,14 +23,14 @@ function getClient() {
     return client;
 }
 
-// อัปโหลดไฟล์สลิปขึ้น bucket แล้วคืน public URL
-// fileBuffer: Buffer ของไฟล์, originalName: ชื่อไฟล์เดิม (ใช้เดานามสกุล), mimeType: ชนิดไฟล์
-async function uploadSlip(fileBuffer, originalName, mimeType) {
+// อัปโหลดไฟล์ขึ้น bucket แล้วคืน public URL (ใช้ร่วมกันทุกชนิดไฟล์: สลิป/บัตร/สัญญา/รูปซ่อม)
+// fileBuffer: Buffer, originalName: ชื่อไฟล์เดิม (เดานามสกุล), mimeType: ชนิดไฟล์, prefix: คำนำหน้าชื่อไฟล์
+async function uploadFile(fileBuffer, originalName, mimeType, prefix = "file") {
     const supabase = getClient();
 
-    // 1. ตั้งชื่อไฟล์ใหม่กันชนกัน: slip-<เวลา>-<สุ่ม>.<นามสกุลเดิม>
-    const ext = (originalName || "").split(".").pop() || "jpg";
-    const fileName = `slip-${Date.now()}-${Math.round(Math.random() * 1e6)}.${ext}`;
+    // 1. ตั้งชื่อไฟล์ใหม่กันชนกัน: <prefix>-<เวลา>-<สุ่ม>.<นามสกุลเดิม>
+    const ext = (originalName || "").split(".").pop() || "bin";
+    const fileName = `${prefix}-${Date.now()}-${Math.round(Math.random() * 1e6)}.${ext}`;
 
     // 2. อัปโหลดขึ้น bucket
     const { error } = await supabase.storage
@@ -38,12 +38,17 @@ async function uploadSlip(fileBuffer, originalName, mimeType) {
         .upload(fileName, fileBuffer, { contentType: mimeType, upsert: false });
 
     if (error) {
-        throw new Error("อัปโหลดสลิปไม่สำเร็จ: " + error.message);
+        throw new Error("อัปโหลดไฟล์ไม่สำเร็จ: " + error.message);
     }
 
-    // 3. ขอ public URL กลับไปเก็บใน payment_evidence
+    // 3. ขอ public URL กลับไปเก็บในฐานข้อมูล
     const { data } = supabase.storage.from(SLIP_BUCKET).getPublicUrl(fileName);
     return data.publicUrl;
 }
 
-module.exports = { uploadSlip };
+// อัปโหลดสลิป (wrapper เดิม — ใช้ prefix 'slip')
+async function uploadSlip(fileBuffer, originalName, mimeType) {
+    return uploadFile(fileBuffer, originalName, mimeType, "slip");
+}
+
+module.exports = { uploadSlip, uploadFile };

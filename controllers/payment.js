@@ -4,6 +4,7 @@ const { buildInvoicePdf } = require("../utils/invoicePdf");
 const { buildPromptpayQr } = require("../utils/promptpayQr");
 const { sendInvoiceMail } = require("../config/mailer");
 const { uploadSlip } = require("../config/supabase");
+const { readSlipQr } = require("../utils/slipQr");
 const { createPromptPayCharge, retrieveCharge } = require("../config/omise");
 const { setAuditUser } = require("../utils/audit");
 
@@ -25,16 +26,19 @@ async function recomputeInvoiceStatus(db, invoiceId) {
     );
     const paidSum = Number(sumRes.rows[0].paid_sum) || 0;
 
-    // 2. ยอดบิลทั้งหมด
+    // 2. ยอดบิลทั้งหมด + ค่าปรับล่าช้า (ถ้ายังไม่ชำระแล้วและเลย due_date) — ต้องรวมด้วย ไม่งั้นจ่ายแค่ยอดบิลเดิมก็ปิด "ชำระแล้ว" ได้ทั้งที่ค่าปรับยังไม่จ่าย
     const invRes = await db.query(
-        `SELECT total_amount FROM invoices WHERE invoice_id = $1`,
+        `SELECT total_amount, due_date, invoice_status FROM invoices WHERE invoice_id = $1`,
         [invoiceId]
     );
-    const total = Number(invRes.rows[0].total_amount) || 0;
+    const inv = invRes.rows[0];
+    const total = Number(inv.total_amount) || 0;
+    const lateFee = inv.invoice_status !== "ชำระแล้ว" ? _calculateLateFee(inv.due_date) : 0;
+    const totalDue = total + lateFee;
 
-    // 3. ตัดสินสถานะใหม่
+    // 3. ตัดสินสถานะใหม่ (เทียบกับยอดบิล + ค่าปรับ)
     let status;
-    if (paidSum >= total && total > 0) {
+    if (paidSum >= totalDue && totalDue > 0) {
         status = "ชำระแล้ว";
     } else if (paidSum > 0) {
         status = "ชำระบางส่วน";
@@ -69,12 +73,18 @@ async function emailReceipt(invoice, payment) {
         return { sent: false, message: "ผู้เช่าไม่มีอีเมล — ข้ามการส่งใบเสร็จ" };
     }
     try {
+        // เลือกชื่อเอกสารใบเสร็จตามประเภทการเช่า (USER_FLOWS)
+        const receiptTitle = invoice.rent_type === "daily"
+            ? "ใบเสร็จจองห้องรายวัน"
+            : "ใบเสร็จจ่ายค่าห้องรายเดือน";
+
         // ใส่ข้อมูลการชำระลง invoice object เพื่อให้ PDF โหมด receipt ใช้ออกเลข/วันที่
         const receiptData = {
             ...invoice,
             payment_id: payment.payment_id,
             payment_method: payment.payment_method,
             payment_date: payment.payment_date,
+            receipt_title: receiptTitle,
         };
         const pdfBuffer = await buildInvoicePdf(receiptData, "receipt");
         const year = new Date(invoice.invoice_date).getFullYear();
@@ -174,13 +184,14 @@ exports.createPayment = async (req, res) => {
             return res.status(400).json({ success: false, message: "บิลนี้ชำระครบแล้ว" });
         }
 
-        // 2. ยอดที่ชำระ — ถ้าไม่ส่งมาให้ default = ยอดคงเหลือ (คำนวณฝั่ง server)
+        // 2. ยอดที่ชำระ — ถ้าไม่ส่งมาให้ default = ยอดคงเหลือ + ค่าปรับล่าช้า (คำนวณฝั่ง server เหมือน getPromptpayQr/createQrCharge)
         const sumRes = await client.query(
             `SELECT COALESCE(SUM(amount_paid), 0) AS paid_sum
              FROM payments WHERE invoice_id = $1 AND payment_status = 'ยืนยันแล้ว'`,
             [invoice_id]
         );
-        const remaining = Number(invoice.total_amount) - Number(sumRes.rows[0].paid_sum);
+        const lateFee = invoice.invoice_status !== "ชำระแล้ว" ? _calculateLateFee(invoice.due_date) : 0;
+        const remaining = Number(invoice.total_amount) + lateFee - Number(sumRes.rows[0].paid_sum);
         const payAmount = amount_paid != null ? Number(amount_paid) : remaining;
 
         if (!(payAmount > 0)) {
@@ -189,22 +200,41 @@ exports.createPayment = async (req, res) => {
         }
 
         // 3. อัปโหลดสลิป (ถ้าแนบมา) ขึ้น Supabase Storage → เก็บเป็น URL
+        //    + อ่าน QR ในรูปสลิป (best-effort) ไว้ช่วย Admin ตอนตรวจ
         let evidenceUrl = null;
+        let slipQrData = null;
         if (req.file) {
             evidenceUrl = await uploadSlip(req.file.buffer, req.file.originalname, req.file.mimetype);
+            slipQrData = await readSlipQr(req.file.buffer);
         }
 
         // 4. เงินสดที่ Admin บันทึก = ยืนยันทันที, นอกนั้นรอตรวจสลิป
         const isCashByAdmin = req.user.role === "Admin" && method === "เงินสด";
+
+        // จ่ายสดที่ออฟฟิศต้องแนบรูปหลักฐาน (เงินสด/สลิป) เสมอ ก่อนยืนยัน (USER_FLOWS)
+        if (isCashByAdmin && !req.file) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ success: false, message: "กรุณาแนบรูปเงินสด/สลิปเป็นหลักฐานก่อนบันทึกการชำระเงินสด" });
+        }
+
         const paymentStatus = isCashByAdmin ? "ยืนยันแล้ว" : "รอตรวจ";
 
         const payRes = await client.query(
-            `INSERT INTO payments (invoice_id, payment_method, amount_paid, payment_evidence, payment_status)
-             VALUES ($1, $2, $3, $4, $5)
-             RETURNING payment_id, invoice_id, payment_date, payment_method, amount_paid, payment_evidence, payment_status`,
-            [invoice_id, method, payAmount, evidenceUrl, paymentStatus]
+            `INSERT INTO payments (invoice_id, payment_method, amount_paid, payment_evidence, payment_status, slip_qr_data)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING payment_id, invoice_id, payment_date, payment_method, amount_paid, payment_evidence, payment_status, slip_qr_data`,
+            [invoice_id, method, payAmount, evidenceUrl, paymentStatus, slipQrData]
         );
         const payment = payRes.rows[0];
+
+        // 4.5 มีสลิป/การชำระส่งเข้ามาแล้ว → หยุดนาฬิกา hold + ยืนยันการจองทันที (ไม่รอ verify)
+        //     ป้องกัน cron ยกเลิก booking ที่ส่งสลิปแล้ว (USER_FLOWS ข้อ 7)
+        await client.query(
+            `UPDATE bookings SET booking_status = 'ยืนยันการจอง', hold_expires_at = NULL
+             WHERE booking_id = (SELECT booking_id FROM invoices WHERE invoice_id = $1)
+               AND booking_status = 'รอชำระมัดจำ'`,
+            [invoice_id]
+        );
 
         // 5. ถ้ายืนยันทันที (เงินสด) → อัปเดตสถานะบิล + ออกใบเสร็จถ้าชำระครบ
         let receiptMsg = "";
@@ -332,7 +362,7 @@ exports.getPayments = async (req, res) => {
         const result = await pool.query(
             `SELECT
                 p.payment_id, p.invoice_id, p.payment_date, p.payment_method,
-                p.amount_paid, p.payment_evidence, p.payment_status,
+                p.amount_paid, p.payment_evidence, p.payment_status, p.slip_qr_data,
                 i.total_amount, i.invoice_status,
                 m.full_name AS guest_name,
                 r.room_number
@@ -563,18 +593,21 @@ exports.pollQrStatus = async (req, res) => {
 // 8. Webhook รับ event จาก Omise — ไม่มี auth (Omise เรียกจากภายนอก)
 //    POST /payment/omise-webhook
 //    เมื่อ charge.complete + จ่ายสำเร็จ → ยืนยัน payment อัตโนมัติ (ใช้ตอน deploy จริง)
+//    ความปลอดภัย: Omise ไม่มี signature header ให้ตรวจ (ต่างจาก Stripe) — จึงห้ามเชื่อ
+//    status/paid/metadata ที่แนบมาใน body ตรงๆ เพราะใครก็ปลอมส่งมาได้ ต้องถามยืนยันกับ
+//    Omise ผ่าน retrieveCharge (ใช้ secret key ของเรา) อีกทีก่อนยืนยันการจ่ายเงินทุกครั้ง
 // ==========================================
 exports.omiseWebhook = async (req, res) => {
     try {
-        const event = req.body;
-        const charge = event?.data;
+        const chargeId = req.body?.data?.id;
+        const isChargeEvent = req.body?.data?.object === "charge";
 
-        // สนใจเฉพาะ event ที่เป็น charge จ่ายสำเร็จ
-        const isPaidCharge = charge?.object === "charge" && charge?.status === "successful" && charge?.paid === true;
-        const paymentId = charge?.metadata?.payment_id;
-
-        if (isPaidCharge && paymentId) {
-            await confirmPaymentPaid(Number(paymentId));
+        if (isChargeEvent && chargeId) {
+            const charge = await retrieveCharge(chargeId); // ยืนยันสถานะจริงกับ Omise
+            const paymentId = charge.metadata?.payment_id;
+            if (charge.paid && paymentId) {
+                await confirmPaymentPaid(Number(paymentId));
+            }
         }
 
         // ตอบ 200 เสมอ เพื่อไม่ให้ Omise ส่งซ้ำ (การทำงานจริง idempotent อยู่แล้ว)

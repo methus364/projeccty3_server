@@ -41,9 +41,12 @@ async function verifyFacebook(accessToken) {
     if (!appId || !appSecret) throw new Error("ยังไม่ได้ตั้งค่า FACEBOOK_APP_ID/SECRET ใน server/.env");
 
     // 1. ยืนยันว่า token เป็นของแอปเราและยังใช้ได้
-    const dbg = await fetch(
-        `https://graph.facebook.com/debug_token?input_token=${encodeURIComponent(accessToken)}&access_token=${appId}|${appSecret}`
-    );
+    //    ส่ง appSecret ผ่าน POST body แทน query string — กัน secret หลุดผ่าน access log/proxy log ที่มักบันทึก URL แบบเต็ม
+    const dbg = await fetch("https://graph.facebook.com/debug_token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ input_token: accessToken, access_token: `${appId}|${appSecret}` }),
+    });
     const dbgData = (await dbg.json()).data || {};
     if (!dbgData.is_valid || String(dbgData.app_id) !== String(appId)) {
         throw new Error("access_token ของ Facebook ไม่ถูกต้องหรือไม่ใช่ของแอปนี้");
@@ -91,6 +94,10 @@ async function verifyLine(code, redirectUri) {
 //   db = client ที่อยู่ใน transaction · คืน { member, isNewUser, linked }
 // ==========================================
 async function findOrCreateMember(db, provider, { provider_id, email, full_name }) {
+    // ล็อกด้วย advisory lock คีย์ตาม provider+provider_id (auto ปลดล็อกตอน COMMIT/ROLLBACK ของ transaction)
+    // กันสอง request login พร้อมกันด้วยบัญชี social เดียวกันแล้วผ่านเช็ค "ยังไม่มีบัญชีนี้" ทั้งคู่ → สร้าง member ซ้ำ
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`${provider}:${provider_id}`]);
+
     // 1. เจอบัญชี social เดิม → ใช้เลย
     const socialRes = await db.query(
         `SELECT m.* FROM social_accounts s

@@ -1,14 +1,30 @@
 const express = require("express");
 const router = express.Router();
+const multer = require("multer");
 
 const {
     getContracts,
     getMyContracts,
     getContractById,
+    requestNotice,
     giveNotice,
+    cancelNotice,
     settleContract,
+    requestRenewal,
+    renewContract,
+    getContractHistory,
 } = require("../controllers/contract");
 const { authCheck, adminCheck } = require("../middleweres/authCheck");
+
+// รับไฟล์สัญญา (รูป/สแกน) ไว้ใน memory แล้วส่งขึ้น Supabase — จำกัด 5MB เฉพาะรูป
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype.startsWith("image/")) cb(null, true);
+        else cb(new Error("อัปโหลดได้เฉพาะไฟล์รูปภาพเท่านั้น"));
+    },
+});
 
 // Tenant: ดูสัญญาของตัวเอง (ต้องวางก่อน '/contract/:id' กัน path ชน)
 router.get("/my-contracts", authCheck, getMyContracts);
@@ -17,8 +33,17 @@ router.get("/my-contracts", authCheck, getMyContracts);
 router.get("/contracts", authCheck, adminCheck, getContracts);
 router.post("/contract/:id/settle", authCheck, adminCheck, settleContract);
 
-// Admin หรือเจ้าของสัญญา: แจ้งย้ายออก / ดูสัญญา (ownership check อยู่ใน controller)
-router.put("/contract/:id/notice", authCheck, giveNotice);
+// แจ้งย้ายออก: ผู้เช่าขอ → Admin ยืนยัน/ยกเลิก
+router.post("/contract/:id/notice-request", authCheck, requestNotice);
+router.put("/contract/:id/notice", authCheck, adminCheck, giveNotice);
+router.put("/contract/:id/notice/cancel", authCheck, adminCheck, cancelNotice);
+
+// ต่อสัญญา: ผู้เช่าขอ → Admin ต่อ (แนบไฟล์สัญญาใหม่ field 'contract_file')
+router.post("/contract/:id/renew-request", authCheck, requestRenewal);
+router.put("/contract/:id/renew", authCheck, adminCheck, upload.single("contract_file"), renewContract);
+
+// Admin หรือเจ้าของสัญญา: ดูประวัติ / ดูสัญญา (ownership check อยู่ใน controller)
+router.get("/contract/:id/history", authCheck, getContractHistory);
 router.get("/contract/:id", authCheck, getContractById);
 
 module.exports = router;

@@ -147,8 +147,9 @@ exports.getMeters = async (req, res) => {
             prev_elec:        row.prev_elec_unit,
             diff_water:       diffWater,
             diff_elec:        diffElec,
-            water_cost:       diffWater != null ? diffWater * WATER_RATE : null,
-            elec_cost:        diffElec  != null ? diffElec  * ELEC_RATE  : null,
+            // กันติดลบตอนคิดเงิน (มิเตอร์ถูกรีเซ็ต/override) — แต่ diff_water/diff_elec ข้างบนโชว์ค่าจริงไว้ให้แอดมินสังเกต
+            water_cost:       diffWater != null ? Math.max(0, diffWater) * WATER_RATE : null,
+            elec_cost:        diffElec  != null ? Math.max(0, diffElec)  * ELEC_RATE  : null,
             recorded_at:      row.recorded_at,
             recorded_by_name: row.recorded_by_name,
             water_rate:       WATER_RATE,

@@ -190,6 +190,14 @@ test('updateMember: อัปเดตสำเร็จ + คงค่าฟิ
   assert.equal(updateCall.params[3], 'Monthly_Tenant'); // user_role อัปเดตใหม่
 });
 
+test('updateMember: user_role ไม่ใช่ค่าที่รู้จัก → 400 (กันหลุดจากทุก role check)', async () => {
+  const res = makeRes();
+  await auth.updateMember({ params: { id: 1 }, body: { user_role: 'SuperAdmin' } }, res);
+  assert.equal(res.statusCode, 400);
+  // ต้องไม่ยิง UPDATE ออกไปเลย
+  assert.equal(calls.some((c) => c.sql.trim().startsWith('UPDATE members')), false);
+});
+
 // ============================================================
 // deleteMember (admin)
 // ============================================================

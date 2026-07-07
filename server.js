@@ -5,7 +5,7 @@ const morgan = require('morgan');
 const { readdirSync } = require('fs');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { startMonthlyBillingCron } = require('./utils/scheduler');
+const { startMonthlyBillingCron, startHoldExpiryCron, startRenewalReminderCron, startMeterReminderCron } = require('./utils/scheduler');
 
 // CORS — อนุญาต web frontend และ mobile app (React Native ไม่ส่ง origin header)
 const allowedOrigins = [
@@ -68,4 +68,7 @@ app.use((err, req, res, next) => {
 app.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
   startMonthlyBillingCron();
+  startHoldExpiryCron();
+  startRenewalReminderCron();
+  startMeterReminderCron();
 });

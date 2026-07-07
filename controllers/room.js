@@ -4,7 +4,7 @@ const pool = require("../config/db");
 // 1. สร้างห้องพักใหม่ (createRoom)
 // ==========================================
 exports.createRoom = async (req, res) => {
-  const { number, room_status, type_name, room_price, price_monthly, deposit_amount, image_url,
+  const { number, room_status, type_name, room_price, price_monthly, image_url,
           description, amenities, room_size } = req.body;
 
   if (!number) {
@@ -14,13 +14,13 @@ exports.createRoom = async (req, res) => {
   try {
     const result = await pool.query(
       `INSERT INTO rooms
-         (room_number, room_status, type_name, room_price, price_monthly, deposit_amount, image_url,
+         (room_number, room_status, type_name, room_price, price_monthly, image_url,
           description, amenities, room_size)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING room_id`,
       [
         number, room_status || 'ว่าง', type_name || null,
-        room_price || null, price_monthly || null, deposit_amount || null, image_url || null,
+        room_price || null, price_monthly || null, image_url || null,
         description || null, amenities || null, room_size || null,
       ]
     );
@@ -49,7 +49,6 @@ exports.getRooms = async (req, res) => {
          type_name      AS "typeName",
          room_price     AS "price",
          price_monthly  AS "priceMonthly",
-         deposit_amount AS "depositAmount",
          image_url      AS "imageUrl",
          description    AS "description",
          amenities      AS "amenities",
@@ -71,7 +70,7 @@ exports.getRooms = async (req, res) => {
 // ==========================================
 exports.editRoom = async (req, res) => {
   const { id } = req.params;
-  const { number, status, type_name, room_price, price_monthly, deposit_amount, image_url,
+  const { number, status, type_name, room_price, price_monthly, image_url,
           description, amenities, room_size } = req.body;
 
   try {
@@ -88,19 +87,17 @@ exports.editRoom = async (req, res) => {
          type_name      = $3,
          room_price     = $4,
          price_monthly  = $5,
-         deposit_amount = $6,
-         image_url      = $7,
-         description    = $8,
-         amenities      = $9,
-         room_size      = $10
-       WHERE room_id = $11`,
+         image_url      = $6,
+         description    = $7,
+         amenities      = $8,
+         room_size      = $9
+       WHERE room_id = $10`,
       [
         number         !== undefined ? number         : c.room_number,
         status         !== undefined ? status         : c.room_status,
         type_name      !== undefined ? type_name      : c.type_name,
         room_price     !== undefined ? room_price     : c.room_price,
         price_monthly  !== undefined ? price_monthly  : c.price_monthly,
-        deposit_amount !== undefined ? deposit_amount : c.deposit_amount,
         image_url      !== undefined ? image_url      : c.image_url,
         description    !== undefined ? description    : c.description,
         amenities      !== undefined ? amenities      : c.amenities,
@@ -139,7 +136,6 @@ exports.searchRooms = async (req, res) => {
          type_name      AS "typeName",
          room_price     AS "price",
          price_monthly  AS "priceMonthly",
-         deposit_amount AS "depositAmount",
          image_url      AS "imageUrl",
          description    AS "description",
          amenities      AS "amenities",
@@ -167,30 +163,42 @@ exports.searchRooms = async (req, res) => {
 // ==========================================
 exports.deleteRoom = async (req, res) => {
   const { id } = req.params;
+  const client = await pool.connect();
 
   try {
-    const bookingCheck = await pool.query(
+    await client.query("BEGIN");
+
+    // ล็อกแถวห้องไว้ก่อน (FOR UPDATE) กันมีคนจองห้องนี้เข้ามาแทรกระหว่างเช็ค-แล้ว-ลบ
+    // (ไม่ล็อกไว้ก่อน booking ที่เพิ่ง insert เข้ามาพอดีจะโดน cascade ลบไปด้วยตอน DELETE rooms)
+    const roomRes = await client.query('SELECT room_id FROM rooms WHERE room_id = $1 FOR UPDATE', [id]);
+    if (roomRes.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, message: "ไม่พบห้องพักที่ต้องการลบ" });
+    }
+
+    const bookingCheck = await client.query(
       `SELECT booking_id FROM bookings
        WHERE room_id = $1 AND booking_status NOT IN ('ยกเลิก', 'ย้ายออกแล้ว') LIMIT 1`,
       [id]
     );
 
     if (bookingCheck.rows.length > 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "ไม่สามารถลบได้ เนื่องจากห้องนี้มีการจองที่ยังใช้งานอยู่",
       });
     }
 
-    const deleteRes = await pool.query('DELETE FROM rooms WHERE room_id = $1', [id]);
-
-    if (deleteRes.rowCount === 0) {
-      return res.status(404).json({ success: false, message: "ไม่พบห้องพักที่ต้องการลบ" });
-    }
+    await client.query('DELETE FROM rooms WHERE room_id = $1', [id]);
+    await client.query("COMMIT");
 
     res.status(200).json({ success: true, message: "ลบห้องพักสำเร็จ" });
   } catch (error) {
+    await client.query("ROLLBACK");
     console.error("Error in deleteRoom:", error);
     res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการลบ", error: error.message });
+  } finally {
+    client.release();
   }
 };
