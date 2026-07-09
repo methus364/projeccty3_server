@@ -4,7 +4,7 @@ const { buildInvoicePdf } = require("../utils/invoicePdf");
 const { buildPromptpayQr } = require("../utils/promptpayQr");
 const { sendInvoiceMail } = require("../config/mailer");
 const { uploadSlip } = require("../config/supabase");
-const { readSlipQr } = require("../utils/slipQr");
+const { readSlipQr, verifySlipImage } = require("../utils/slipQr");
 const { createPromptPayCharge, retrieveCharge } = require("../config/omise");
 const { setAuditUser } = require("../utils/audit");
 const { MONTHLY_LOCK_DEPOSIT } = require("../config/billing_rules");
@@ -205,8 +205,19 @@ exports.createPayment = async (req, res) => {
         let evidenceUrl = null;
         let slipQrData = null;
         if (req.file) {
+            // จ่ายแบบ "โอนเงิน" → รูปที่แนบต้องเป็นสลิปโอนเงินจริง (มี QR ตรวจสอบสลิปมาตรฐานไทย)
+            // กันแนบรูปมั่ว/รูปที่ไม่ใช่สลิป · จ่าย "เงินสด" (Admin แนบรูปเงินสด) ไม่ต้องมี QR ข้ามการเช็ค
+            if (method === "โอนเงิน") {
+                const slipCheck = await verifySlipImage(req.file.buffer);
+                if (!slipCheck.ok) {
+                    await client.query("ROLLBACK");
+                    return res.status(400).json({ success: false, message: slipCheck.reason });
+                }
+                slipQrData = slipCheck.qrText;
+            } else {
+                slipQrData = await readSlipQr(req.file.buffer);
+            }
             evidenceUrl = await uploadSlip(req.file.buffer, req.file.originalname, req.file.mimetype);
-            slipQrData = await readSlipQr(req.file.buffer);
         }
 
         // 4. เงินสดที่ Admin บันทึก = ยืนยันทันที, นอกนั้นรอตรวจสลิป
