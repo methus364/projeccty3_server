@@ -7,6 +7,7 @@ const { uploadSlip } = require("../config/supabase");
 const { readSlipQr } = require("../utils/slipQr");
 const { createPromptPayCharge, retrieveCharge } = require("../config/omise");
 const { setAuditUser } = require("../utils/audit");
+const { MONTHLY_LOCK_DEPOSIT } = require("../config/billing_rules");
 
 // ==========================================
 // Helper: รวมยอดที่ "ยืนยันแล้ว" ของบิล + อัปเดต invoice_status ให้สอดคล้อง
@@ -635,9 +636,11 @@ exports.omiseWebhook = async (req, res) => {
 };
 
 // ==========================================
-// 9. จ่ายเงินตอนจอง (แบบ Agoda) — เฉพาะรายวัน — Tenant/Admin
+// 9. จ่ายเงินตอนจอง (แบบ Agoda) — Tenant/Admin
 //    POST /booking/:id/pay-now
-//    สร้างบิลค่าห้องเต็มจำนวน + QR Omise ให้จ่ายทันที (จ่ายครบ → จองยืนยันอัตโนมัติ)
+//    รายวัน  = คิดค่าห้องเต็มจำนวน (ราคา/วัน × จำนวนวัน)
+//    รายเดือน = มัดจำล็อกห้องคงที่ 2,000 บาท (กันห้องก่อนไปเช็คอิน)
+//    สร้างบิล + QR PromptPay ให้จ่ายทันที (แนบสลิป → จองยืนยันอัตโนมัติ)
 // ==========================================
 exports.payBookingNow = async (req, res) => {
     const client = await pool.connect();
@@ -658,24 +661,36 @@ exports.payBookingNow = async (req, res) => {
         if (bkRes.rows.length === 0) throw new Error("ไม่พบการจองที่ระบุ");
         const bk = bkRes.rows[0];
 
-        // เช็คสิทธิ์ + เงื่อนไข (จ่ายตอนจองเฉพาะรายวัน + ยังรอชำระ)
+        // เช็คสิทธิ์ + เงื่อนไข (จ่ายตอนจอง + ยังรอชำระ)
         if (req.user.role !== "Admin" && bk.member_id !== req.user.id) {
             await client.query("ROLLBACK");
             return res.status(403).json({ success: false, message: "ไม่มีสิทธิ์ชำระการจองนี้" });
-        }
-        if (bk.rent_type !== "daily") {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ success: false, message: "จ่ายตอนจองรองรับเฉพาะห้องรายวัน (รายเดือนชำระตอนเช็คอิน)" });
         }
         if (bk.booking_status !== "รอชำระมัดจำ") {
             await client.query("ROLLBACK");
             return res.status(400).json({ success: false, message: `การจองนี้สถานะ "${bk.booking_status}" ไม่ต้องชำระซ้ำ` });
         }
 
-        // คิดค่าห้องเต็มจำนวน (ราคา/วัน × จำนวนวัน)
-        const nights = Math.ceil(Math.abs(new Date(bk.check_out_date) - new Date(bk.check_in_date)) / 86400000) || 1;
-        const total = nights * Number(bk.room_price || 0);
-        if (!(total > 0)) throw new Error("คำนวณยอดค่าห้องไม่ได้");
+        // คิดยอดที่ต้องจ่ายตอนจอง แยกตามประเภทเช่า
+        let total;
+        let itemName;
+        let quantity;
+        let unitPrice;
+        if (bk.rent_type === "monthly") {
+            // รายเดือน: มัดจำล็อกห้องคงที่ 2,000 บาท (ไม่ผูกกับราคาห้อง)
+            total = MONTHLY_LOCK_DEPOSIT;
+            itemName = "มัดจำล็อกห้องรายเดือน";
+            quantity = 1;
+            unitPrice = MONTHLY_LOCK_DEPOSIT;
+        } else {
+            // รายวัน: ค่าห้องเต็มจำนวน (ราคา/วัน × จำนวนวัน)
+            const nights = Math.ceil(Math.abs(new Date(bk.check_out_date) - new Date(bk.check_in_date)) / 86400000) || 1;
+            total = nights * Number(bk.room_price || 0);
+            itemName = `ค่าห้องพักรายวัน (${nights} วัน)`;
+            quantity = nights;
+            unitPrice = bk.room_price;
+        }
+        if (!(total > 0)) throw new Error("คำนวณยอดที่ต้องชำระไม่ได้");
 
         // หาบิลเดิมของการจองนี้ (กันออกซ้ำ) — ถ้าไม่มีค่อยสร้างใหม่
         let invoiceId;
@@ -698,7 +713,7 @@ exports.payBookingNow = async (req, res) => {
             await client.query(
                 `INSERT INTO invoice_details (invoice_id, item_name, quantity, unit_price, subtotal)
                  VALUES ($1, $2, $3, $4, $5)`,
-                [invoiceId, `ค่าห้องพักรายวัน (${nights} วัน)`, nights, bk.room_price, total]
+                [invoiceId, itemName, quantity, unitPrice, total]
             );
         }
 
