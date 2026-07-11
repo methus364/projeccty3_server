@@ -24,8 +24,9 @@ exports.register = async (req, res) => {
     // 2. Hash Password
     const hashPassword = await bcrypt.hash(password, 10);
 
-    // 3. บังคับ role เป็น Daily_Tenant เสมอ — เลื่อน role ผ่าน admin เท่านั้น (กัน privilege escalation)
-    const finalRole = 'Daily_Tenant';
+    // 3. รับ role ที่เลือกตอนสมัครได้ แต่ whitelist เฉพาะ Daily_Tenant/Monthly_Tenant เท่านั้น
+    // ห้ามรับ "Admin" หรือค่าอื่นจาก client เด็ดขาด (กัน privilege escalation)
+    const finalRole = user_role === 'Monthly_Tenant' ? 'Monthly_Tenant' : 'Daily_Tenant';
 
     // 4. INSERT รวม email
     await pool.query(

@@ -75,6 +75,19 @@ test('register: สมัครสำเร็จ → 201 + role บังคั
   assert.equal(insertCall.params[5], 'Daily_Tenant');
 });
 
+test('register: เลือก user_role เป็น Monthly_Tenant ตอนสมัคร → เก็บ Monthly_Tenant', async () => {
+  setHandler((sql) => {
+    if (has(sql, 'SELECT username FROM Members')) return { rows: [] };
+    if (sql.trim().startsWith('INSERT INTO Members')) return { rows: [] };
+    return { rows: [] };
+  });
+  const res = makeRes();
+  await auth.register({ body: { username: 'user3', password: '123456', full_name: 'ทดสอบ', user_role: 'Monthly_Tenant' } }, res);
+  assert.equal(res.statusCode, 201);
+  const insertCall = calls.find((c) => c.sql.trim().startsWith('INSERT INTO Members'));
+  assert.equal(insertCall.params[5], 'Monthly_Tenant');
+});
+
 // ============================================================
 // login
 // ============================================================

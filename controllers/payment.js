@@ -8,6 +8,7 @@ const { readSlipQr, verifySlipImage } = require("../utils/slipQr");
 const { createPromptPayCharge, retrieveCharge } = require("../config/omise");
 const { setAuditUser } = require("../utils/audit");
 const { MONTHLY_LOCK_DEPOSIT } = require("../config/billing_rules");
+const { WATER_RATE, ELEC_RATE } = require("../config/utility_rates");
 
 // ==========================================
 // Helper: รวมยอดที่ "ยืนยันแล้ว" ของบิล + อัปเดต invoice_status ให้สอดคล้อง
@@ -721,10 +722,15 @@ exports.payBookingNow = async (req, res) => {
                 [id, today, total]
             );
             invoiceId = invRes.rows[0].invoice_id;
+            // เรียงรายการย่อยให้อ่านง่าย: ค่าน้ำ → ค่าไฟ → ค่าห้อง
+            // ณ ตอนจอง/จ่ายล่วงหน้ายังไม่มีมิเตอร์จริง จึงใส่ค่าน้ำ/ไฟเป็น 0 หน่วยไว้ก่อน แล้วไปอัปเดตยอดจริงตอนออกบิลรายเดือน (computeInvoice)
             await client.query(
                 `INSERT INTO invoice_details (invoice_id, item_name, quantity, unit_price, subtotal)
-                 VALUES ($1, $2, $3, $4, $5)`,
-                [invoiceId, itemName, quantity, unitPrice, total]
+                 VALUES
+                    ($1, 'ค่าน้ำ (0 หน่วย)', 0, $2, 0),
+                    ($1, 'ค่าไฟ (0 หน่วย)', 0, $3, 0),
+                    ($1, $4, $5, $6, $7)`,
+                [invoiceId, WATER_RATE, ELEC_RATE, itemName, quantity, unitPrice, total]
             );
         }
 
