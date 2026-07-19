@@ -253,10 +253,10 @@ exports.createInvoice = async (req, res) => {
 
 // ==========================================
 // 2. ดูรายการบิลทั้งหมด (getInvoices) — Admin
-//    GET /invoices?status=&month=
+//    GET /invoices?status=&month=&rentType=daily|monthly
 // ==========================================
 exports.getInvoices = async (req, res) => {
-    const { status, month } = req.query;
+    const { status, month, rentType } = req.query;
 
     try {
         // สร้างเงื่อนไขแบบ dynamic ตาม filter ที่ส่งมา
@@ -271,12 +271,18 @@ exports.getInvoices = async (req, res) => {
             params.push(month);
             conditions.push(`to_char(i.invoice_date, 'YYYY-MM') = $${params.length}`);
         }
+        // แยกบิลรายวัน/รายเดือน — หน้าบิลรายวันกับรายเดือนแยกกันเด็ดขาด ไม่ปนกัน
+        if (rentType === "daily" || rentType === "monthly") {
+            params.push(rentType);
+            conditions.push(`b.rent_type = $${params.length}`);
+        }
         const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
         const result = await pool.query(
             `SELECT
                 i.invoice_id, i.booking_id, i.invoice_date, i.due_date,
                 i.room_cost, i.water_cost, i.elec_cost, i.total_amount, i.invoice_status, i.sent_at,
+                b.member_id, b.rent_type,
                 m.full_name   AS guest_name,
                 r.room_number
              FROM invoices i
@@ -504,7 +510,8 @@ exports.sendInvoiceEmail = async (req, res) => {
 // ==========================================
 // 7. ออกบิลรายเดือนยกชุด (generateMonthly) — Admin
 //    POST /invoices/generate-monthly  body: { month? }
-//    ออกบิลให้ทุกการจองรายเดือนที่ 'กำลังเข้าพัก' และยังไม่มีบิลในเดือนนั้น
+//    ออกบิลให้เฉพาะห้องที่มี "สัญญาเช่ารายเดือน" ที่ยังมีผลใช้งานอยู่เท่านั้น (ยึดสัญญาเป็นหลักฐานตัวจริง
+//    ไม่ใช่แค่ดู booking.rent_type เฉยๆ) และยังไม่มีบิลในเดือนนี้
 // ==========================================
 exports.generateMonthly = async (req, res) => {
     const month = req.body.month || getCurrentMonth();
@@ -512,14 +519,15 @@ exports.generateMonthly = async (req, res) => {
     const dueDate = new Date(new Date(invoiceDate).getTime() + 7 * 86400000).toISOString().split("T")[0];
 
     try {
-        // หาการจองรายเดือนที่กำลังเข้าพัก และยังไม่มีบิลในเดือนนี้
+        // หาห้องที่มีสัญญารายเดือน "มีผลใช้งาน" และยังไม่มีบิลในเดือนนี้
         const targetsRes = await pool.query(
             `SELECT b.booking_id, b.room_id, b.member_id, b.rent_type,
                     b.check_in_date, b.check_out_date,
                     r.room_price, r.price_monthly, r.room_number
-             FROM bookings b
+             FROM contracts c
+             JOIN bookings b ON b.booking_id = c.booking_id
              JOIN rooms r ON b.room_id = r.room_id
-             WHERE b.rent_type = 'monthly'
+             WHERE c.contract_status = 'มีผลใช้งาน'
                AND b.booking_status = 'กำลังเข้าพัก'
                AND NOT EXISTS (
                    SELECT 1 FROM invoices i

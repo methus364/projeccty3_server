@@ -368,10 +368,10 @@ exports.verifyPayment = async (req, res) => {
 
 // ==========================================
 // 4. ดูรายการชำระเงินทั้งหมด — Admin
-//    GET /payments?status=&invoice_id=
+//    GET /payments?status=&invoice_id=&rentType=daily|monthly
 // ==========================================
 exports.getPayments = async (req, res) => {
-    const { status, invoice_id } = req.query;
+    const { status, invoice_id, rentType } = req.query;
 
     try {
         // ประกอบเงื่อนไข filter แบบ dynamic
@@ -386,6 +386,11 @@ exports.getPayments = async (req, res) => {
             params.push(invoice_id);
             conditions.push(`p.invoice_id = $${params.length}`);
         }
+        // แยกรายการชำระ/ใบเสร็จรายวัน-รายเดือน ไม่ปนกัน
+        if (rentType === "daily" || rentType === "monthly") {
+            params.push(rentType);
+            conditions.push(`b.rent_type = $${params.length}`);
+        }
         const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
         const result = await pool.query(
@@ -393,6 +398,7 @@ exports.getPayments = async (req, res) => {
                 p.payment_id, p.invoice_id, p.payment_date, p.payment_method,
                 p.amount_paid, p.payment_evidence, p.payment_status, p.slip_qr_data,
                 i.total_amount, i.invoice_status,
+                b.member_id, b.rent_type,
                 m.full_name AS guest_name,
                 r.room_number
              FROM payments p
