@@ -86,15 +86,20 @@ async function computeInvoice(db, booking, month) {
     const elecCost  = elecUnits  * ELEC_RATE;
 
     // 3. ยอดรวม + รายการย่อย (1 บรรทัด/ประเภท)
+    // ชื่อรายการน้ำ/ไฟ โชว์ช่วงเลขมิเตอร์เริ่ม-จบ (ไม่ใช่แค่จำนวนหน่วย) ตามฟอร์แมตใบแจ้งหนี้จริง
     const totalAmount = roomCost + waterCost + elecCost;
-    // ถ้าค่าน้ำโดนขั้นต่ำ ให้ชื่อรายการบอกชัดว่าเป็นขั้นต่ำ (subtotal จะไม่เท่ากับ หน่วย×เรต)
-    const waterItemName = (hasWater && waterByUnit < WATER_MINIMUM)
-        ? `ค่าน้ำ (${waterUnits} หน่วย, ขั้นต่ำ)`
-        : `ค่าน้ำ (${waterUnits} หน่วย)`;
+    const waterItemName = !hasWater
+        ? "ค่าน้ำ (ไม่มีข้อมูลมิเตอร์)"
+        : (waterByUnit < WATER_MINIMUM
+            ? `ค่าน้ำ ค่าบริการขั้นต่ำ (${meter.prev_water}-${meter.curr_water})`
+            : `ค่าน้ำ (${meter.prev_water}-${meter.curr_water})`);
+    const elecItemName = hasElec
+        ? `ค่าไฟ (${meter.prev_elec}-${meter.curr_elec})`
+        : "ค่าไฟ (ไม่มีข้อมูลมิเตอร์)";
     const details = [
         { item_name: roomItemName, quantity: 1, unit_price: roomCost, subtotal: roomCost },
         { item_name: waterItemName, quantity: waterUnits, unit_price: WATER_RATE, subtotal: waterCost },
-        { item_name: `ค่าไฟ (${elecUnits} หน่วย)`, quantity: elecUnits, unit_price: ELEC_RATE, subtotal: elecCost },
+        { item_name: elecItemName, quantity: elecUnits, unit_price: ELEC_RATE, subtotal: elecCost },
     ];
 
     return { room_cost: roomCost, water_cost: waterCost, elec_cost: elecCost, total_amount: totalAmount, details };

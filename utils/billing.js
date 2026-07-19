@@ -5,11 +5,26 @@
 // ============================================================
 const { PRORATION_DAYS } = require("../config/billing_rules");
 
+// ชื่อเดือนไทยเต็ม ใช้ตั้งชื่อรายการบิล เช่น "1-31 พฤษภาคม 2568"
+const THAI_MONTH_NAMES = [
+    "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+    "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
+];
+
 // บวกวันเข้ากับวันที่ (คืน Date ใหม่)
 function addDays(date, days) {
     const d = new Date(date);
     d.setDate(d.getDate() + days);
     return d;
+}
+
+// แปลงช่วงวันที่ (อยู่เดือนเดียวกัน) เป็นข้อความไทย เช่น "1-31 พฤษภาคม 2568"
+function formatThaiDateRange(startDate, endDate) {
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const monthName = THAI_MONTH_NAMES[end.getMonth()];
+    const yearBE = end.getFullYear() + 543;
+    return `${start.getDate()}-${end.getDate()} ${monthName} ${yearBE}`;
 }
 
 // วันสุดท้ายของเดือน 'YYYY-MM' (เช่น '2026-02' → 28)
@@ -55,13 +70,23 @@ function computeMonthlyRoomCost(checkInDate, priceMonthly, invoiceMonth) {
 
     // พ้น prepaid ก่อนเดือนนี้แล้ว → คิดเต็มเดือน
     if (billableStart <= monthStart) {
-        return { roomCost: price, days: lastDay, isFullMonth: true, itemName: "ค่าห้อง (รายเดือน)" };
+        return {
+            roomCost: price,
+            days: lastDay,
+            isFullMonth: true,
+            itemName: `ค่าเช่าห้องล่วงหน้า ${formatThaiDateRange(monthStart, monthEnd)}`,
+        };
     }
 
     // เดือนที่ prepaid หมดกลางเดือน → prorate เฉพาะวันที่เหลือ
     const days = Math.round((monthEnd - billableStart) / 86400000) + 1; // inclusive
     const roomCost = Math.round(dailyRate(price) * days * 100) / 100;
-    return { roomCost, days, isFullMonth: false, itemName: `ค่าห้อง (${days} วัน)` };
+    return {
+        roomCost,
+        days,
+        isFullMonth: false,
+        itemName: `ค่าเช่าห้องล่วงหน้า ${formatThaiDateRange(billableStart, monthEnd)}`,
+    };
 }
 
 // ============================================================
@@ -73,4 +98,4 @@ function proratedRent(priceMonthly, days) {
     return Math.round(dailyRate(priceMonthly) * d * 100) / 100;
 }
 
-module.exports = { addDays, lastDayOfMonth, dailyRate, computeMonthlyRoomCost, proratedRent };
+module.exports = { addDays, lastDayOfMonth, dailyRate, computeMonthlyRoomCost, proratedRent, formatThaiDateRange };
