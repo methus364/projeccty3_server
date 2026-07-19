@@ -184,12 +184,14 @@ exports.createInvoice = async (req, res) => {
         await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
 
         // 1. โหลดข้อมูลการจอง + ห้อง — ล็อกแถว booking ไว้ก่อน (FOR UPDATE) กันสอง request ออกบิลซ้ำให้ booking+เดือนเดียวกันพร้อมกัน
+        // ราคารายเดือนดึงจาก contracts.monthly_rent (ล็อกไว้ตอนทำสัญญา) ไม่ใช่ rooms.price_monthly ปัจจุบัน
         const bookingRes = await client.query(
             `SELECT b.booking_id, b.room_id, b.member_id, b.rent_type,
                     b.check_in_date, b.check_out_date,
-                    r.room_price, r.price_monthly
+                    r.room_price, c.monthly_rent AS price_monthly
              FROM bookings b
              JOIN rooms r ON b.room_id = r.room_id
+             LEFT JOIN contracts c ON c.booking_id = b.booking_id AND c.contract_status = 'มีผลใช้งาน'
              WHERE b.booking_id = $1
              FOR UPDATE OF b`,
             [booking_id]
@@ -529,10 +531,11 @@ exports.generateMonthly = async (req, res) => {
 
     try {
         // หาห้องที่มีสัญญารายเดือน "มีผลใช้งาน" และยังไม่มีบิลในเดือนนี้
+        // ราคารายเดือนดึงจาก c.monthly_rent (ล็อกไว้ตอนทำสัญญา) ไม่ใช่ rooms.price_monthly ปัจจุบัน
         const targetsRes = await pool.query(
             `SELECT b.booking_id, b.room_id, b.member_id, b.rent_type,
                     b.check_in_date, b.check_out_date,
-                    r.room_price, r.price_monthly, r.room_number
+                    r.room_price, c.monthly_rent AS price_monthly, r.room_number
              FROM contracts c
              JOIN bookings b ON b.booking_id = c.booking_id
              JOIN rooms r ON b.room_id = r.room_id

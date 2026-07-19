@@ -29,14 +29,18 @@ async function createContractForBooking(db, booking, opts = {}) {
     const billingDay      = opts.billingDay      != null ? Number(opts.billingDay)      : 1;
     const contractFileUrl = opts.contractFileUrl || null;
 
+    // ค่าเช่า/เดือนล็อกไว้ตอนทำสัญญา = ราคาห้อง ณ วันเช็คอิน — บิลเดือนถัดๆ ไปยึดค่านี้
+    // ไม่ใช่ rooms.price_monthly ปัจจุบัน กันกรณี Admin แก้ราคาห้องแล้วกระทบสัญญาเก่า
+    const monthlyRent = Number(booking.price_monthly) || 0;
+
     const res = await db.query(
         `INSERT INTO contracts
             (booking_id, member_id, room_id, start_date, end_date, billing_day,
-             rent_prepaid, security_deposit, key_deposit, contract_file_url, contract_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'มีผลใช้งาน')
+             monthly_rent, rent_prepaid, security_deposit, key_deposit, contract_file_url, contract_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'มีผลใช้งาน')
          RETURNING contract_id`,
         [booking.booking_id, booking.member_id, booking.room_id, startDate, endDate, billingDay,
-         rentPrepaid, securityDeposit, keyDeposit, contractFileUrl]
+         monthlyRent, rentPrepaid, securityDeposit, keyDeposit, contractFileUrl]
     );
     return res.rows[0].contract_id;
 }
