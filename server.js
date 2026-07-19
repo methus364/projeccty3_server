@@ -44,6 +44,12 @@ app.use(morgan('dev'));
 app.use(express.json());
 app.use(cors(corsOptions));
 
+// API เป็นข้อมูลสดที่เปลี่ยนตลอด (การจอง/บิล/สลิป ฯลฯ) ห้าม browser cache ไว้แล้วได้ข้อมูลเก่า
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
+
 // ใช้ rate limit กับ auth route
 app.use('/api/login', authLimiter);
 app.use('/api/register', authLimiter);

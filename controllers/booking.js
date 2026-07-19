@@ -52,6 +52,30 @@ async function sendBookingConfirmation({ email, fullName, bookingRef, roomNumber
     }
 }
 
+// ผู้เช่ารายเดือน 1 คน ถือครองห้องได้แค่ 1 ห้อง ณ เวลาหนึ่ง
+// เช็คว่า member นี้มีการจองรายเดือนที่ยัง active (ไม่ใช่ยกเลิก/ย้ายออกแล้ว) ค้างอยู่หรือไม่
+async function hasActiveMonthlyBooking(client, memberId) {
+    // ล็อกแถวสมาชิกไว้ก่อน กันสอง request จองห้องรายเดือนพร้อมกันหลุดผ่านเช็คทั้งคู่
+    await client.query(`SELECT member_id FROM members WHERE member_id = $1 FOR UPDATE`, [memberId]);
+    const res = await client.query(
+        `SELECT booking_id FROM bookings
+         WHERE member_id = $1 AND rent_type = 'monthly'
+         AND booking_status NOT IN ('ยกเลิก', 'ย้ายออกแล้ว') LIMIT 1`,
+        [memberId]
+    );
+    return res.rows.length > 0;
+}
+
+// เช็ค role ของสมาชิกสดจาก DB แทนการเชื่อ role ใน JWT ตอน login
+// (role อาจถูกเลื่อนอัตโนมัติหลัง login แล้ว เช่นตอนเช็คอินรายเดือน — ดู checkIn ด้านล่าง)
+async function getFreshUserRole(client, memberId) {
+    const res = await client.query(
+        `SELECT user_role FROM members WHERE member_id = $1 LIMIT 1`,
+        [memberId]
+    );
+    return res.rows[0]?.user_role || null;
+}
+
 // ==========================================
 // 1. สร้างการจองห้องพัก (createBooking) — Tenant
 // ==========================================
@@ -64,6 +88,17 @@ exports.createBooking = async (req, res) => {
     try {
         await client.query("BEGIN");
         await setAuditUser(client, req.user?.id); // M10b: บันทึกผู้ทำลง audit log
+
+        // กันข้าม role: รายวันจองได้แค่รายวัน, รายเดือนจองได้แค่รายเดือน
+        // เช็คสดจาก DB (ไม่ใช้ req.user.role จาก JWT) เพราะ role อาจถูกเลื่อนเป็น
+        // Monthly_Tenant อัตโนมัติหลัง login แล้ว (ตอนเช็คอินรายเดือน) โดยไม่มีการออก token ใหม่
+        const freshRole = await getFreshUserRole(client, userId);
+        if (freshRole === "Daily_Tenant" && rentType !== "daily") {
+            throw new Error("ผู้เช่ารายวันจองห้องแบบรายเดือนไม่ได้");
+        }
+        if (freshRole === "Monthly_Tenant" && rentType !== "monthly") {
+            throw new Error("ผู้เช่ารายเดือนจองห้องแบบรายวันไม่ได้");
+        }
 
         // 1. ดึงราคาห้องพักจากตาราง rooms (ทั้ง daily และ monthly)
         // ล็อกแถวห้องไว้ก่อน (FOR UPDATE) กันสองคนจองห้อง/ช่วงเวลาเดียวกันพร้อมกันแล้วผ่าน overlap check ทั้งคู่
@@ -88,6 +123,11 @@ exports.createBooking = async (req, res) => {
         );
 
         if (overlapRes.rows.length > 0) throw new Error("ห้องนี้ถูกจองหรือมีผู้เช่าพักอยู่แล้วในช่วงเวลาดังกล่าว");
+
+        // 2.5 รายเดือน: 1 คนถือครองได้แค่ 1 ห้อง — ห้ามจองซ้อนห้องอื่นถ้ายังมีรายการ active อยู่
+        if (rentType === 'monthly' && await hasActiveMonthlyBooking(client, userId)) {
+            throw new Error("คุณมีห้องพักรายเดือนที่กำลังเช่าหรือจองอยู่แล้ว ไม่สามารถจองห้องเพิ่มได้");
+        }
 
         // 3. คำนวณราคาสุทธิตาม rent_type
         const diffDays = Math.ceil(Math.abs(new Date(endDate) - new Date(startDate)) / 86400000) || 1;
@@ -288,14 +328,26 @@ exports.getAllBookings = async (req, res) => {
                 r.price_monthly  AS "priceMonthly",
                 m.full_name      AS "guestName",
                 m.username       AS "username",
-                EXISTS (
-                    SELECT 1 FROM payments p
-                    JOIN invoices i ON p.invoice_id = i.invoice_id
-                    WHERE i.booking_id = b.booking_id AND p.payment_status = 'รอตรวจ'
-                ) AS "hasPendingSlip"
+                m.phone_number   AS "guestPhone",
+                m.email          AS "guestEmail",
+                pp.payment_id    AS "latestPaymentId",
+                pp.payment_evidence AS "latestSlipUrl",
+                pp.amount_paid   AS "latestAmount",
+                pp.payment_method AS "latestMethod",
+                pp.payment_status AS "latestPaymentStatus",
+                (pp.payment_status = 'รอตรวจ') AS "hasPendingSlip"
             FROM bookings b
             JOIN rooms r ON b.room_id = r.room_id
             LEFT JOIN members m ON b.member_id = m.member_id
+            LEFT JOIN LATERAL (
+                -- การชำระล่าสุดของการจองนี้ ไม่ว่าจะตรวจแล้วหรือรอตรวจ (ผูกผ่านบิล)
+                SELECT p.payment_id, p.payment_evidence, p.amount_paid, p.payment_method, p.payment_status
+                FROM payments p
+                JOIN invoices i ON p.invoice_id = i.invoice_id
+                WHERE i.booking_id = b.booking_id
+                ORDER BY p.payment_date DESC
+                LIMIT 1
+            ) pp ON true
             ${rentFilter}
             ORDER BY b.booking_date DESC
         `;
@@ -336,6 +388,10 @@ exports.adminCreateBooking = async (req, res) => {
             [roomId, startDate, endDate]
         );
         if (overlapRes.rows.length > 0) throw new Error("ห้องนี้ถูกจองหรือมีผู้เช่าพักอยู่แล้วในช่วงเวลาดังกล่าว");
+
+        if (rentType === 'monthly' && await hasActiveMonthlyBooking(client, userId)) {
+            throw new Error("ผู้เช่าคนนี้มีห้องพักรายเดือนที่กำลังเช่าหรือจองอยู่แล้ว ไม่สามารถจองห้องเพิ่มได้");
+        }
 
         const diffDays = Math.ceil(Math.abs(new Date(endDate) - new Date(startDate)) / 86400000) || 1;
         let totalPrice;
