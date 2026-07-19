@@ -690,16 +690,20 @@ exports.payBookingNow = async (req, res) => {
         }
 
         // คิดยอดที่ต้องจ่ายตอนจอง แยกตามประเภทเช่า
+        // invoiceType: รายเดือน = แค่มัดจำล็อกห้อง ไม่ใช่บิลค่าห้องจริง (บิลจริงออกทีหลังผ่าน createInvoice)
+        //              รายวัน = จ่ายเต็มจำนวนตอนนี้เลย ถือเป็นบิลค่าห้องจริง
         let total;
         let itemName;
         let quantity;
         let unitPrice;
+        let invoiceType;
         if (bk.rent_type === "monthly") {
             // รายเดือน: มัดจำล็อกห้องคงที่ 2,000 บาท (ไม่ผูกกับราคาห้อง)
             total = MONTHLY_LOCK_DEPOSIT;
             itemName = "มัดจำล็อกห้องรายเดือน";
             quantity = 1;
             unitPrice = MONTHLY_LOCK_DEPOSIT;
+            invoiceType = "deposit";
         } else {
             // รายวัน: ค่าห้องเต็มจำนวน (ราคา/วัน × จำนวนวัน)
             const nights = Math.ceil(Math.abs(new Date(bk.check_out_date) - new Date(bk.check_in_date)) / 86400000) || 1;
@@ -707,6 +711,7 @@ exports.payBookingNow = async (req, res) => {
             itemName = `ค่าห้องพักรายวัน (${nights} วัน)`;
             quantity = nights;
             unitPrice = bk.room_price;
+            invoiceType = "rent";
         }
         if (!(total > 0)) throw new Error("คำนวณยอดที่ต้องชำระไม่ได้");
 
@@ -722,10 +727,10 @@ exports.payBookingNow = async (req, res) => {
             const today = new Date().toISOString().split("T")[0];
             const invRes = await client.query(
                 `INSERT INTO invoices
-                    (booking_id, invoice_date, due_date, room_cost, water_cost, elec_cost, total_amount, invoice_status)
-                 VALUES ($1, $2, $2, $3, 0, 0, $3, 'ยังไม่ชำระ')
+                    (booking_id, invoice_date, due_date, room_cost, water_cost, elec_cost, total_amount, invoice_status, invoice_type)
+                 VALUES ($1, $2, $2, $3, 0, 0, $3, 'ยังไม่ชำระ', $4)
                  RETURNING invoice_id`,
-                [id, today, total]
+                [id, today, total, invoiceType]
             );
             invoiceId = invRes.rows[0].invoice_id;
             // เรียงรายการย่อยให้อ่านง่าย: ค่าน้ำ → ค่าไฟ → ค่าห้อง

@@ -265,7 +265,9 @@ exports.getInvoices = async (req, res) => {
 
     try {
         // สร้างเงื่อนไขแบบ dynamic ตาม filter ที่ส่งมา
-        const conditions = [];
+        // หน้าบิลรายวัน/รายเดือนแสดงเฉพาะบิลค่าห้องจริง (invoice_type='rent')
+        // ไม่รวมบิลมัดจำตอนจอง (invoice_type='deposit' จาก payBookingNow)
+        const conditions = [`i.invoice_type = 'rent'`];
         const params = [];
 
         if (status) {
@@ -320,9 +322,9 @@ exports.getMyInvoices = async (req, res) => {
     const { status } = req.query;
 
     try {
-        // เงื่อนไขหลัก: บิลที่ผูกกับ booking ของ user คนนี้
+        // เงื่อนไขหลัก: บิลที่ผูกกับ booking ของ user คนนี้ + เฉพาะบิลค่าห้องจริง (ไม่รวมบิลมัดจำตอนจอง)
         const params = [req.user.id];
-        let where = `WHERE b.member_id = $1`;
+        let where = `WHERE b.member_id = $1 AND i.invoice_type = 'rent'`;
         if (status) {
             params.push(status);
             where += ` AND i.invoice_status = $${params.length}`;
