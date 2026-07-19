@@ -198,11 +198,13 @@ exports.createInvoice = async (req, res) => {
         const booking = bookingRes.rows[0];
 
         // 2. กันออกบิลซ้ำ booking + เดือนเดียวกัน (ยกเว้นบิลที่ถูกยกเลิก)
+        // เช็คเฉพาะ invoice_type='rent' — ไม่นับบิลมัดจำตอนจอง (deposit) ที่อาจออกไปแล้วในเดือนเดียวกัน
         const dupRes = await client.query(
             `SELECT invoice_id FROM invoices
              WHERE booking_id = $1
                AND to_char(invoice_date, 'YYYY-MM') = $2
                AND invoice_status != 'ยกเลิก'
+               AND invoice_type = 'rent'
              LIMIT 1`,
             [booking_id, month]
         );
@@ -569,11 +571,13 @@ exports.generateMonthly = async (req, res) => {
                 await client.query(`SELECT booking_id FROM bookings WHERE booking_id = $1 FOR UPDATE`, [booking.booking_id]);
 
                 // เช็คซ้ำอีกครั้งหลังล็อก (targetsRes ด้านบนคิดไว้ก่อนล็อก อาจมีรายการที่เพิ่งถูกออกบิลไปแล้วระหว่างนี้)
+                // เช็คเฉพาะ invoice_type='rent' — ไม่นับบิลมัดจำตอนจอง (deposit) ที่อาจออกไปแล้วในเดือนเดียวกัน
                 const dupRes = await client.query(
                     `SELECT invoice_id FROM invoices
                      WHERE booking_id = $1
                        AND to_char(invoice_date, 'YYYY-MM') = $2
                        AND invoice_status != 'ยกเลิก'
+                       AND invoice_type = 'rent'
                      LIMIT 1`,
                     [booking.booking_id, month]
                 );
