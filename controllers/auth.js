@@ -21,6 +21,17 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: "Username already exists" });
     }
 
+    // 1.1 ตรวจสอบ email ซ้ำ (เฉพาะกรณีที่ผู้ใช้กรอกมา เพราะ email nullable ได้)
+    if (email) {
+      const checkEmail = await pool.query(
+        'SELECT email FROM Members WHERE email = $1 LIMIT 1',
+        [email]
+      );
+      if (checkEmail.rows.length > 0) {
+        return res.status(400).json({ message: "Email already exists" });
+      }
+    }
+
     // 2. Hash Password
     const hashPassword = await bcrypt.hash(password, 10);
 
