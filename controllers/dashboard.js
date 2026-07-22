@@ -12,8 +12,11 @@ const pool = require("../config/db");
 // ==========================================
 exports.getSummary = async (req, res) => {
     try {
+        // การ์ดสรุปทั้ง 5 ตัวไม่พึ่งพากัน จึงยิง query พร้อมกันด้วย Promise.all
+        // ทำให้ latency ของหน้า dashboard = query ที่ช้าที่สุดตัวเดียว แทนผลรวมทั้ง 5
+
         // --- 1.1 รายได้เดือนนี้ = ผลรวมเงินที่ "ยืนยันแล้ว" ในเดือนปัจจุบัน ---
-        const revenueRes = await pool.query(
+        const revenuePromise = pool.query(
             `SELECT COALESCE(SUM(amount_paid), 0) AS revenue
              FROM payments
              WHERE payment_status = 'ยืนยันแล้ว'
@@ -21,24 +24,14 @@ exports.getSummary = async (req, res) => {
         );
 
         // --- 1.2 จำนวนห้องแยกตามสถานะ (ว่าง / มีผู้เช่า / ปิดปรับปรุง) ---
-        const roomRes = await pool.query(
+        const roomPromise = pool.query(
             `SELECT room_status, COUNT(*) AS count
              FROM rooms
              GROUP BY room_status`
         );
 
-        // แปลงผลลัพธ์เป็นออบเจกต์อ่านง่าย พร้อมยอดรวม
-        const rooms = { total: 0, vacant: 0, occupied: 0, maintenance: 0 };
-        for (const row of roomRes.rows) {
-            const count = Number(row.count);
-            rooms.total += count;
-            if (row.room_status === "ว่าง") rooms.vacant = count;
-            else if (row.room_status === "มีผู้เช่า") rooms.occupied = count;
-            else if (row.room_status === "ปิดปรับปรุง") rooms.maintenance = count;
-        }
-
         // --- 1.3 หนี้ค้างชำระ = ยอดบิลคงค้าง (ยอดบิล − เงินที่ยืนยันแล้ว) ของบิลที่ยังไม่ปิด ---
-        const debtRes = await pool.query(
+        const debtPromise = pool.query(
             `SELECT
                 COALESCE(SUM(i.total_amount - COALESCE(p.paid, 0)), 0) AS outstanding,
                 COUNT(*) AS unpaid_count
@@ -53,14 +46,14 @@ exports.getSummary = async (req, res) => {
         );
 
         // --- 1.4 แจ้งซ่อมที่ยังค้างอยู่ (ยังไม่ done) ---
-        const repairRes = await pool.query(
+        const repairPromise = pool.query(
             `SELECT COUNT(*) AS pending_repairs
              FROM maintenance_requests
              WHERE status <> 'done'`
         );
 
         // --- 1.5 ห้องรายเดือนที่ยังไม่จดมิเตอร์เดือนนี้ (เตือนก่อนออกบิล) ---
-        const meterRes = await pool.query(
+        const meterPromise = pool.query(
             `SELECT COUNT(*) AS unrecorded
              FROM bookings b
              JOIN rooms r ON b.room_id = r.room_id
@@ -71,6 +64,21 @@ exports.getSummary = async (req, res) => {
                      AND um.record_month = to_char(CURRENT_DATE, 'YYYY-MM')
                )`
         );
+
+        // รอผลทั้ง 5 query พร้อมกัน
+        const [revenueRes, roomRes, debtRes, repairRes, meterRes] = await Promise.all([
+            revenuePromise, roomPromise, debtPromise, repairPromise, meterPromise,
+        ]);
+
+        // แปลงผลลัพธ์ห้องเป็นออบเจกต์อ่านง่าย พร้อมยอดรวม
+        const rooms = { total: 0, vacant: 0, occupied: 0, maintenance: 0 };
+        for (const row of roomRes.rows) {
+            const count = Number(row.count);
+            rooms.total += count;
+            if (row.room_status === "ว่าง") rooms.vacant = count;
+            else if (row.room_status === "มีผู้เช่า") rooms.occupied = count;
+            else if (row.room_status === "ปิดปรับปรุง") rooms.maintenance = count;
+        }
 
         res.json({
             success: true,

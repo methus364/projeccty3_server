@@ -77,33 +77,34 @@ async function cancelExpiredHolds() {
            )`
     );
 
-    // ลบทีละรายการใน transaction ของตัวเอง (ลบตารางลูกก่อนตามลำดับ FK)
-    for (const row of expiredRes.rows) {
-        const client = await pool.connect();
-        try {
-            await client.query("BEGIN");
-            // 1) ลบรายละเอียดบิล + บิล ที่ผูกกับ booking นี้ (ยังไม่มี payment แน่นอนจากเงื่อนไขข้างบน)
-            await client.query(
-                `DELETE FROM invoice_details
-                 WHERE invoice_id IN (SELECT invoice_id FROM invoices WHERE booking_id = $1)`,
-                [row.booking_id]
-            );
-            await client.query(`DELETE FROM invoices WHERE booking_id = $1`, [row.booking_id]);
-            // 2) ลบตัว booking ทิ้ง
-            await client.query(`DELETE FROM bookings WHERE booking_id = $1`, [row.booking_id]);
-            // 3) คืนห้องว่าง
-            await client.query(`UPDATE rooms SET room_status = 'ว่าง' WHERE room_id = $1`, [row.room_id]);
-            await client.query("COMMIT");
-        } catch (err) {
-            await client.query("ROLLBACK");
-            console.error(`[cron] ลบการจองหมดเวลา ${row.booking_id} ไม่สำเร็จ:`, err.message);
-        } finally {
-            client.release();
-        }
-    }
+    if (expiredRes.rows.length === 0) return;
 
-    if (expiredRes.rows.length > 0) {
-        console.log(`[cron] ลบการจองที่หมดเวลาล็อกห้อง ${expiredRes.rows.length} รายการ`);
+    // รวม id ของทุก booking/room ที่หมดเวลา แล้วลบทั้งชุดใน transaction เดียว
+    // (เดิมเปิด connection + transaction ใหม่ทีละแถว ซึ่ง cron นี้รันทุก 1 นาทีจึงสิ้นเปลืองมาก)
+    const bookingIds = expiredRes.rows.map((row) => row.booking_id);
+    const roomIds = expiredRes.rows.map((row) => row.room_id);
+
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+        // 1) ลบรายละเอียดบิล + บิล ที่ผูกกับ booking เหล่านี้ (ยังไม่มี payment แน่นอนจากเงื่อนไขข้างบน)
+        await client.query(
+            `DELETE FROM invoice_details
+             WHERE invoice_id IN (SELECT invoice_id FROM invoices WHERE booking_id = ANY($1))`,
+            [bookingIds]
+        );
+        await client.query(`DELETE FROM invoices WHERE booking_id = ANY($1)`, [bookingIds]);
+        // 2) ลบตัว booking ทิ้ง
+        await client.query(`DELETE FROM bookings WHERE booking_id = ANY($1)`, [bookingIds]);
+        // 3) คืนห้องว่าง
+        await client.query(`UPDATE rooms SET room_status = 'ว่าง' WHERE room_id = ANY($1)`, [roomIds]);
+        await client.query("COMMIT");
+        console.log(`[cron] ลบการจองที่หมดเวลาล็อกห้อง ${bookingIds.length} รายการ`);
+    } catch (err) {
+        await client.query("ROLLBACK");
+        console.error(`[cron] ลบการจองหมดเวลาไม่สำเร็จ:`, err.message);
+    } finally {
+        client.release();
     }
 }
 
@@ -151,11 +152,15 @@ async function notifyExpiringContracts() {
                 console.error(`[cron] ส่งอีเมลเตือนสัญญา ${c.contract_id} ไม่สำเร็จ:`, err.message);
             }
         }
-        // ตั้ง flag กันแจ้งซ้ำ (ตั้งเสมอ แม้ไม่มีอีเมล)
-        await pool.query(`UPDATE contracts SET renewal_notified_at = CURRENT_TIMESTAMP WHERE contract_id = $1`, [c.contract_id]);
     }
 
     if (res.rows.length > 0) {
+        // ตั้ง flag กันแจ้งซ้ำให้ทุกสัญญาในชุดเดียว (แทนการ UPDATE ทีละรายการในลูป)
+        const contractIds = res.rows.map((c) => c.contract_id);
+        await pool.query(
+            `UPDATE contracts SET renewal_notified_at = CURRENT_TIMESTAMP WHERE contract_id = ANY($1)`,
+            [contractIds]
+        );
         console.log(`[cron] แจ้งเตือนสัญญาใกล้ครบ ${res.rows.length} รายการ`);
     }
 }
