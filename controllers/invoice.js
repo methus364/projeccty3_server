@@ -4,6 +4,7 @@ const { computeMonthlyRoomCost } = require("../utils/billing");
 const { setAuditUser } = require("../utils/audit");
 const { buildInvoicePdf } = require("../utils/invoicePdf");
 const { sendInvoiceMail } = require("../config/mailer");
+const { buildPagination } = require("../utils/pagination");
 
 // ==========================================
 // Helper: คำนวณค่าปรับจ่ายบิลช้า 50 บาท/วัน นับจากวันครบกำหนด
@@ -289,6 +290,14 @@ exports.getInvoices = async (req, res) => {
         }
         const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
+        // แบ่งหน้า (ถ้า client ส่ง ?limit มา) — ไม่ส่งมา = คืนทั้งหมดเหมือนเดิม (ไม่พังของเดิม)
+        const page = buildPagination(req.query);
+        let limitClause = "";
+        if (page) {
+            params.push(page.limit, page.offset);
+            limitClause = `LIMIT $${params.length - 1} OFFSET $${params.length}`;
+        }
+
         const result = await pool.query(
             `SELECT
                 i.invoice_id, i.booking_id, i.invoice_date, i.due_date,
@@ -301,7 +310,8 @@ exports.getInvoices = async (req, res) => {
              LEFT JOIN members m ON b.member_id = m.member_id
              JOIN rooms r ON b.room_id = r.room_id
              ${where}
-             ORDER BY i.invoice_date DESC, i.invoice_id DESC`,
+             ORDER BY i.invoice_date DESC, i.invoice_id DESC
+             ${limitClause}`,
             params
         );
 
@@ -553,14 +563,20 @@ exports.generateMonthly = async (req, res) => {
         const created = [];
         const skipped = []; // ห้องที่ข้ามเพราะยังไม่จดมิเตอร์เดือนนี้ (กันคิดค่าน้ำ/ไฟเป็น 0)
 
+        // ดึงรายชื่อห้องที่ "จดมิเตอร์เดือนนี้แล้ว" มาทีเดียว แล้วเก็บใน Set ไว้เช็คในลูป
+        // (เดิม query เช็คมิเตอร์ทีละ booking = N query, ตอนนี้เหลือ query เดียว)
+        const targetRoomIds = targetsRes.rows.map((b) => b.room_id);
+        const recordedRes = await pool.query(
+            `SELECT DISTINCT room_id FROM utility_meters
+             WHERE record_month = $1 AND room_id = ANY($2)`,
+            [month, targetRoomIds]
+        );
+        const recordedRoomIds = new Set(recordedRes.rows.map((r) => r.room_id));
+
         // ออกบิลทีละการจอง (แต่ละบิลเป็น transaction ของตัวเอง)
         for (const booking of targetsRes.rows) {
             // ข้ามห้องที่ยังไม่จดมิเตอร์เดือนนี้ — ไม่ออกบิลให้ (กันคิดค่าน้ำ/ไฟผิดเป็น 0 บาทเงียบๆ)
-            const meterCheck = await pool.query(
-                `SELECT 1 FROM utility_meters WHERE room_id = $1 AND record_month = $2 LIMIT 1`,
-                [booking.room_id, month]
-            );
-            if (meterCheck.rows.length === 0) {
+            if (!recordedRoomIds.has(booking.room_id)) {
                 skipped.push(booking.room_number);
                 continue;
             }
@@ -599,13 +615,19 @@ exports.generateMonthly = async (req, res) => {
                 );
                 const invoiceId = invRes.rows[0].invoice_id;
 
-                for (const d of calc.details) {
-                    await client.query(
-                        `INSERT INTO invoice_details (invoice_id, item_name, quantity, unit_price, subtotal)
-                         VALUES ($1, $2, $3, $4, $5)`,
-                        [invoiceId, d.item_name, d.quantity, d.unit_price, d.subtotal]
-                    );
-                }
+                // insert รายการย่อยทุกบรรทัดในคำสั่งเดียว (multi-row) แทน insert ทีละบรรทัด
+                // สร้างชุด placeholder ($1..) ให้ตรงกับพารามิเตอร์ที่ flatten ออกมา
+                const detailValues = [];
+                const detailPlaceholders = calc.details.map((d, index) => {
+                    const base = index * 5;
+                    detailValues.push(invoiceId, d.item_name, d.quantity, d.unit_price, d.subtotal);
+                    return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+                });
+                await client.query(
+                    `INSERT INTO invoice_details (invoice_id, item_name, quantity, unit_price, subtotal)
+                     VALUES ${detailPlaceholders.join(", ")}`,
+                    detailValues
+                );
 
                 await client.query("COMMIT");
 

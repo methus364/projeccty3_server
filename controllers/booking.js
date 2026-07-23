@@ -3,6 +3,7 @@ const { _createContractForBooking } = require("./contract");
 const { setAuditUser } = require("../utils/audit");
 const { sendMail } = require("../config/mailer");
 const { uploadFile } = require("../config/supabase");
+const { buildPagination } = require("../utils/pagination");
 const bcrypt = require("bcryptjs");
 
 // สร้างเลขอ้างอิงการจองให้อ่านง่าย เช่น BK-2026-0042
@@ -312,6 +313,15 @@ exports.getAllBookings = async (req, res) => {
             params.push(rentType);
             rentFilter = `WHERE b.rent_type = $1`;
         }
+
+        // แบ่งหน้า (ถ้า client ส่ง ?limit มา) — ไม่ส่งมา = คืนทั้งหมดเหมือนเดิม
+        const page = buildPagination(req.query);
+        let limitClause = "";
+        if (page) {
+            params.push(page.limit, page.offset);
+            limitClause = `LIMIT $${params.length - 1} OFFSET $${params.length}`;
+        }
+
         const query = `
             SELECT
                 b.booking_id     AS "bookingId",
@@ -350,6 +360,7 @@ exports.getAllBookings = async (req, res) => {
             ) pp ON true
             ${rentFilter}
             ORDER BY b.booking_date DESC
+            ${limitClause}
         `;
         const result = await pool.query(query, params);
         res.status(200).json({ success: true, count: result.rows.length, data: result.rows });

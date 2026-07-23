@@ -1,5 +1,6 @@
 const pool = require("../config/db");
 const { setAuditUser } = require("../utils/audit");
+const { buildPagination } = require("../utils/pagination");
 
 // ==========================================
 // M9 — Products & Sales / ขายของหอพัก
@@ -206,6 +207,14 @@ exports.getSales = async (req, res) => {
             where = `WHERE to_char(s.sale_date, 'YYYY-MM') = $1`;
         }
 
+        // แบ่งหน้า (ถ้า client ส่ง ?limit มา) — ไม่ส่งมา = คืนทั้งหมดเหมือนเดิม
+        const page = buildPagination(req.query);
+        let limitClause = "";
+        if (page) {
+            params.push(page.limit, page.offset);
+            limitClause = `LIMIT $${params.length - 1} OFFSET $${params.length}`;
+        }
+
         const result = await pool.query(
             `SELECT
                 s.sale_id, s.product_id, s.quantity, s.total_price, s.sale_date,
@@ -217,7 +226,8 @@ exports.getSales = async (req, res) => {
              LEFT JOIN members buyer  ON s.member_id = buyer.member_id
              LEFT JOIN members seller ON s.sold_by   = seller.member_id
              ${where}
-             ORDER BY s.sale_date DESC, s.sale_id DESC`,
+             ORDER BY s.sale_date DESC, s.sale_id DESC
+             ${limitClause}`,
             params
         );
 

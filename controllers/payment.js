@@ -9,6 +9,7 @@ const { createPromptPayCharge, retrieveCharge } = require("../config/omise");
 const { setAuditUser } = require("../utils/audit");
 const { MONTHLY_LOCK_DEPOSIT } = require("../config/billing_rules");
 const { WATER_RATE, ELEC_RATE } = require("../config/utility_rates");
+const { buildPagination } = require("../utils/pagination");
 
 // ==========================================
 // Helper: รวมยอดที่ "ยืนยันแล้ว" ของบิล + อัปเดต invoice_status ให้สอดคล้อง
@@ -393,6 +394,14 @@ exports.getPayments = async (req, res) => {
         }
         const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
+        // แบ่งหน้า (ถ้า client ส่ง ?limit มา) — ไม่ส่งมา = คืนทั้งหมดเหมือนเดิม
+        const page = buildPagination(req.query);
+        let limitClause = "";
+        if (page) {
+            params.push(page.limit, page.offset);
+            limitClause = `LIMIT $${params.length - 1} OFFSET $${params.length}`;
+        }
+
         const result = await pool.query(
             `SELECT
                 p.payment_id, p.invoice_id, p.payment_date, p.payment_method,
@@ -407,7 +416,8 @@ exports.getPayments = async (req, res) => {
              LEFT JOIN members m ON b.member_id = m.member_id
              JOIN rooms r ON b.room_id = r.room_id
              ${where}
-             ORDER BY p.payment_date DESC, p.payment_id DESC`,
+             ORDER BY p.payment_date DESC, p.payment_id DESC
+             ${limitClause}`,
             params
         );
 
