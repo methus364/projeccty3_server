@@ -165,15 +165,28 @@ exports.createBooking = async (req, res) => {
         const holdExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
         const bookingRef = formatBookingRef(bookingId);
 
-        // ดึงอีเมล/ชื่อผู้เช่าจากตาราง members (คิวรีเร็ว) เพื่อเตรียมส่งเมลยืนยัน
+        // ส่งอีเมลยืนยันการจอง (หลัง COMMIT — ทำนอก transaction)
+        // ดึงอีเมล/ชื่อผู้เช่าจากตาราง members
         const memberRes = await pool.query(
             `SELECT email, full_name FROM members WHERE member_id = $1 LIMIT 1`,
             [userId]
         );
         const member = memberRes.rows[0] || {};
 
-        // ตอบหน้าจอทันที — ไม่ยืนรอ Gmail SMTP ส่งเมลให้เสร็จก่อน (หน้าจองเด้งเร็วขึ้นมาก)
-        // emailSent = มีอีเมลผู้เช่าหรือไม่ (ถ้ามี = จะส่งให้แบบเบื้องหลัง)
+        // รอส่งอีเมลให้เสร็จก่อนตอบหน้าจอ — การันตีว่าเมลถูกส่งจริง (ไม่พึ่ง cron)
+        // ตัว mailer เปิด connection pool + timeout ไว้แล้ว การส่งเลยเร็ว/ไม่ค้างยาว หน้าจอจึงเด้งไวตาม
+        const mailResult = await sendBookingConfirmation({
+            email: member.email,
+            fullName: member.full_name,
+            bookingRef,
+            roomNumber: room_number,
+            checkIn: startDate,
+            checkOut: endDate,
+            nights: diffDays,
+            totalPrice,
+            rentType,
+        });
+
         res.status(201).json({
             success: true,
             bookingId,
@@ -185,25 +198,7 @@ exports.createBooking = async (req, res) => {
             rentType,
             totalPrice,
             holdExpiresAt,
-            emailSent: !!member.email,
-        });
-
-        // ส่งอีเมลยืนยันการจองเบื้องหลัง (หลัง response ถูก flush ออกไปแล้ว)
-        // ⚠️ ต้องเปิด cron-job.org กันเซิร์ฟเวอร์หลับ ไม่งั้นงานนี้อาจถูกตัดทิ้งบน Render free (เมลไม่ส่ง)
-        setImmediate(() => {
-            sendBookingConfirmation({
-                email: member.email,
-                fullName: member.full_name,
-                bookingRef,
-                roomNumber: room_number,
-                checkIn: startDate,
-                checkOut: endDate,
-                nights: diffDays,
-                totalPrice,
-                rentType,
-            })
-                .then((r) => { if (!r.sent && member.email) console.error("Booking Mail not sent:", r.reason); })
-                .catch((err) => console.error("Booking Mail (background) Error:", err.message));
+            emailSent: mailResult.sent,
         });
 
     } catch (error) {

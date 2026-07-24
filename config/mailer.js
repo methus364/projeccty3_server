@@ -20,6 +20,14 @@ function getTransporter() {
         transporter = nodemailer.createTransport({
             service: "gmail",
             auth: { user: MAIL_USER, pass: MAIL_PASS },
+            // เปิด connection pool — reuse การเชื่อมต่อ Gmail ไม่ต้อง handshake ใหม่ทุกครั้ง (ส่งเร็วขึ้น)
+            pool: true,
+            maxConnections: 3,
+            maxMessages: 100,
+            // ใส่ timeout กันค้างยาวเมื่อเจออีเมลมั่ว/Gmail อืด — เลิกรอไวขึ้น หน้าจอไม่ค้าง
+            connectionTimeout: 10000, // รอเชื่อมต่อ SMTP สูงสุด 10 วิ
+            greetingTimeout: 10000,   // รอ greeting จากเซิร์ฟเวอร์สูงสุด 10 วิ
+            socketTimeout: 15000,     // ไม่มีข้อมูลวิ่งเกิน 15 วิ = ตัดทิ้ง
         });
     }
     return transporter;
