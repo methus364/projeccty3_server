@@ -253,39 +253,39 @@ exports.createPayment = async (req, res) => {
         // การชำระนี้ทำให้การจอง (รายวัน) เปลี่ยนจากรอชำระ → ยืนยันการจองหรือไม่
         const bookingConfirmed = bookingUpdate.rowCount > 0;
 
-        // 5. ออกใบเสร็จ (รอส่งเมลให้เสร็จก่อนตอบหน้าจอ — การันตีว่าเมลถูกส่งจริง
-        //    fire-and-forget ใช้ไม่ได้บน Render free เพราะ instance ถูกพักหลังตอบ response)
-        let receiptMsg = "";
+        // 5. คิดสถานะบิล + ตัดสินว่าจะต้องออกใบเสร็จไหม (เงินสด admin = ชำระครบ · ลูกค้า = จองถูกยืนยัน)
+        let shouldEmailReceipt = false;
         if (isCashByAdmin) {
-            // เงินสด (admin) → คิดสถานะบิล + ออกใบเสร็จถ้าชำระครบ
+            // เงินสด (admin) → คิดสถานะบิลก่อน COMMIT
             const result = await recomputeInvoiceStatus(client, invoice_id);
-            await client.query("COMMIT");
-            if (result.status === "ชำระแล้ว") {
-                const fullInvoice = await _loadFullInvoice(pool, invoice_id);
-                const mail = await emailReceipt(fullInvoice, payment);
-                receiptMsg = " " + mail.message;
-            }
-        } else {
-            await client.query("COMMIT");
-            // ลูกค้าอัปสลิปแล้วการจองถูกยืนยัน → ออกใบเสร็จ + รายละเอียดการจอง ส่งอีเมลกลับทันที
-            if (bookingConfirmed) {
-                const fullInvoice = await _loadFullInvoice(pool, invoice_id);
-                const mail = await emailReceipt(fullInvoice, payment);
-                receiptMsg = " " + mail.message;
-            }
+            shouldEmailReceipt = result.status === "ชำระแล้ว";
         }
+        await client.query("COMMIT");
+        if (!isCashByAdmin && bookingConfirmed) shouldEmailReceipt = true;
 
+        // ตอบหน้าจอทันที — ไม่ยืนรอสร้าง PDF ใบเสร็จ + ส่งอีเมลให้เสร็จก่อน (หน้าส่งสลิปเด้งเร็วขึ้นมาก)
         res.status(201).json({
             success: true,
             data: payment,
             bookingConfirmed,
             // ยืนยันการจองแล้ว → บอกว่าออกใบเสร็จให้ · บิลอื่น (เช่นรายเดือน) → รอแอดมินตรวจ
             message: isCashByAdmin
-                ? "บันทึกการชำระเงินสำเร็จ" + receiptMsg
+                ? "บันทึกการชำระเงินสำเร็จ"
                 : (bookingConfirmed
-                    ? "ชำระเงินสำเร็จ ยืนยันการจองและออกใบเสร็จให้แล้ว" + receiptMsg
+                    ? "ชำระเงินสำเร็จ ยืนยันการจองและออกใบเสร็จให้แล้ว"
                     : "แจ้งชำระเงินสำเร็จ รอแอดมินตรวจสอบ"),
         });
+
+        // ออกใบเสร็จ PDF + ส่งอีเมลเบื้องหลัง (หลัง response ถูก flush ออกไปแล้ว)
+        // ⚠️ ต้องเปิด cron-job.org กันเซิร์ฟเวอร์หลับ ไม่งั้นงานนี้อาจถูกตัดทิ้งบน Render free (เมลไม่ส่ง)
+        if (shouldEmailReceipt) {
+            setImmediate(() => {
+                _loadFullInvoice(pool, invoice_id)
+                    .then((fullInvoice) => emailReceipt(fullInvoice, payment))
+                    .then((r) => { if (r && !r.sent) console.error("Receipt Mail not sent:", r.message); })
+                    .catch((err) => console.error("emailReceipt (background) Error:", err.message));
+            });
+        }
 
     } catch (error) {
         await client.query("ROLLBACK");
