@@ -165,26 +165,15 @@ exports.createBooking = async (req, res) => {
         const holdExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
         const bookingRef = formatBookingRef(bookingId);
 
-        // ส่งอีเมลยืนยันการจอง (หลัง COMMIT — ทำนอก transaction)
-        // ดึงอีเมล/ชื่อผู้เช่าจากตาราง members
+        // ดึงอีเมล/ชื่อผู้เช่าจากตาราง members (คิวรีเร็ว) เพื่อเตรียมส่งเมลยืนยัน
         const memberRes = await pool.query(
             `SELECT email, full_name FROM members WHERE member_id = $1 LIMIT 1`,
             [userId]
         );
         const member = memberRes.rows[0] || {};
 
-        const mailResult = await sendBookingConfirmation({
-            email: member.email,
-            fullName: member.full_name,
-            bookingRef,
-            roomNumber: room_number,
-            checkIn: startDate,
-            checkOut: endDate,
-            nights: diffDays,
-            totalPrice,
-            rentType,
-        });
-
+        // ตอบหน้าจอทันที — ไม่ยืนรอ Gmail SMTP ส่งเมลให้เสร็จก่อน (ทำให้หน้าจองเด้งเร็วขึ้นมาก)
+        // emailSent = มีอีเมลผู้เช่าหรือไม่ (ถ้ามี = จะส่งให้แบบเบื้องหลัง)
         res.status(201).json({
             success: true,
             bookingId,
@@ -196,8 +185,21 @@ exports.createBooking = async (req, res) => {
             rentType,
             totalPrice,
             holdExpiresAt,
-            emailSent: mailResult.sent,
+            emailSent: !!member.email,
         });
+
+        // ส่งอีเมลยืนยันการจองเบื้องหลัง (fire-and-forget) — ล้มเหลวไม่กระทบการจอง
+        sendBookingConfirmation({
+            email: member.email,
+            fullName: member.full_name,
+            bookingRef,
+            roomNumber: room_number,
+            checkIn: startDate,
+            checkOut: endDate,
+            nights: diffDays,
+            totalPrice,
+            rentType,
+        }).catch((err) => console.error("Booking Mail (background) Error:", err.message));
 
     } catch (error) {
         await client.query("ROLLBACK");
