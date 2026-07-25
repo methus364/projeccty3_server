@@ -2,7 +2,13 @@
 // อ่านค่า MAIL_USER / MAIL_PASS จาก .env (App Password ของ Gmail)
 // ใช้รูปแบบ fail-fast เหมือน config/secret.js: ถ้าลืมตั้งค่าจะหยุดทันทีเมื่อเรียกใช้งานจริง
 const nodemailer = require("nodemailer");
+const dns = require("dns");
 require("dotenv").config();
+
+// บังคับให้ Node เลือก IPv4 ก่อนเสมอเมื่อ resolve ชื่อโฮสต์
+// เหตุผล: Render ต่อ IPv6 ออกไป smtp.gmail.com ไม่ได้ (ENETUNREACH)
+// การตั้งค่านี้ครอบทั้ง process จึงชัวร์กว่า option family:4 ของ nodemailer
+dns.setDefaultResultOrder("ipv4first");
 
 const MAIL_USER = process.env.MAIL_USER;
 const MAIL_PASS = process.env.MAIL_PASS;
