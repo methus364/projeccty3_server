@@ -17,8 +17,12 @@ function getTransporter() {
     }
 
     if (!transporter) {
+        // ระบุ host/port ชัดเจนแทน service:"gmail" — กันปัญหาพอร์ตถูกบล็อกบน Render
+        // ใช้พอร์ต 465 (SSL) ซึ่ง Render อนุญาต outbound ได้ปกติ
         transporter = nodemailer.createTransport({
-            service: "gmail",
+            host: "smtp.gmail.com",
+            port: 465,
+            secure: true,
             auth: { user: MAIL_USER, pass: MAIL_PASS },
             // เปิด connection pool — reuse การเชื่อมต่อ Gmail ไม่ต้อง handshake ใหม่ทุกครั้ง (ส่งเร็วขึ้น)
             pool: true,
