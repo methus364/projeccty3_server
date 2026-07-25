@@ -100,6 +100,10 @@ exports.createBooking = async (req, res) => {
         if (freshRole === "Monthly_Tenant" && rentType !== "monthly") {
             throw new Error("ผู้เช่ารายเดือนจองห้องแบบรายวันไม่ได้");
         }
+        // fail-closed: role ที่ระบบไม่รู้จัก/หาไม่เจอ (null) ห้ามจอง — กันหลุดทุก guard ด้านบน
+        if (!["Daily_Tenant", "Monthly_Tenant", "Admin"].includes(freshRole)) {
+            throw new Error("บัญชีนี้ไม่มีสิทธิ์จองห้องพัก กรุณาติดต่อเจ้าหน้าที่");
+        }
 
         // 1. ดึงราคาห้องพักจากตาราง rooms (ทั้ง daily และ monthly)
         // ล็อกแถวห้องไว้ก่อน (FOR UPDATE) กันสองคนจองห้อง/ช่วงเวลาเดียวกันพร้อมกันแล้วผ่าน overlap check ทั้งคู่
@@ -145,10 +149,12 @@ exports.createBooking = async (req, res) => {
         // 4. บันทึกการจองพร้อม rent_type + ล็อกห้องชั่วคราว 5 นาที (hold_expires_at)
         //    ถ้าไม่มีสลิปส่งเข้ามาภายใน 5 นาที cron จะยกเลิกให้อัตโนมัติ (USER_FLOWS)
         const bookingRes = await client.query(
-            `INSERT INTO bookings (member_id, room_id, check_in_date, check_out_date, booking_status, rent_type, hold_expires_at)
-             VALUES ($1, $2, $3, $4, 'รอชำระมัดจำ', $5, NOW() + interval '5 minutes') RETURNING booking_id, hold_expires_at`,
+            `INSERT INTO bookings (member_id, room_id, check_in_date, check_out_date, booking_status, rent_type, hold_expires_at, booking_date)
+             VALUES ($1, $2, $3, $4, 'รอชำระมัดจำ', $5, NOW() + interval '5 minutes', NOW())
+             RETURNING booking_id, hold_expires_at, to_char(booking_date, 'YYYY-MM-DD"T"HH24:MI:SS') AS booked_at`,
             [userId, roomId, startDate, endDate, rentType]
         );
+        const bookedAt = bookingRes.rows[0].booked_at; // เวลาที่จองจริง (ค่าเดียวจาก DB — ใช้ทั้งหน้าชำระ/ประวัติ)
 
         // 5. อัปเดตสถานะห้องพักเป็น 'มีผู้เช่า'
         await client.query(
@@ -194,6 +200,7 @@ exports.createBooking = async (req, res) => {
             roomNumber: room_number,
             checkInDate: startDate,
             checkOutDate: endDate,
+            bookedAt,
             nights: diffDays,
             rentType,
             totalPrice,
@@ -232,6 +239,16 @@ exports.createBookingBatch = async (req, res) => {
     // กันเลือกห้องซ้ำในคำขอเดียว
     const uniqueRoomIds = [...new Set(roomIds.map(Number))];
 
+    // เพดานการจอง: 1 บัญชีจองได้สูงสุด 5 ห้องต่อการจอง 1 ครั้ง (กันกักห้อง — ต้องตรงกับฝั่งแอป)
+    const MAX_ROOMS_PER_BOOKING = 5;
+    if (uniqueRoomIds.length > MAX_ROOMS_PER_BOOKING) {
+        client.release();
+        return res.status(400).json({
+            success: false,
+            message: `จองได้สูงสุด ${MAX_ROOMS_PER_BOOKING} ห้องต่อการจอง 1 ครั้ง หากต้องการมากกว่านี้ กรุณาติดต่อเจ้าหน้าที่`,
+        });
+    }
+
     try {
         await client.query("BEGIN");
         await setAuditUser(client, req.user?.id);
@@ -241,12 +258,17 @@ exports.createBookingBatch = async (req, res) => {
         if (freshRole === "Monthly_Tenant") {
             throw new Error("ผู้เช่ารายเดือนใช้การจองหลายห้องแบบรายวันไม่ได้");
         }
+        // fail-closed: role ที่ระบบไม่รู้จัก/หาไม่เจอ (null) ห้ามจอง
+        if (!["Daily_Tenant", "Admin"].includes(freshRole)) {
+            throw new Error("บัญชีนี้ไม่มีสิทธิ์จองห้องพัก กรุณาติดต่อเจ้าหน้าที่");
+        }
 
         const diffDays = Math.ceil(Math.abs(new Date(endDate) - new Date(startDate)) / 86400000) || 1;
         const holdExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
 
         const bookings = [];
         let totalPrice = 0;
+        let bookedAt = null; // เวลาที่จองจริง (จากห้องแรก) — ใช้ให้ตรงกันทั้งหน้าชำระ/ประวัติ
 
         for (const roomId of uniqueRoomIds) {
             // ล็อกแถวห้อง (FOR UPDATE) + ดึงราคา/สถานะ กันสองคนจองห้องเดียวกันพร้อมกัน
@@ -271,11 +293,13 @@ exports.createBookingBatch = async (req, res) => {
             totalPrice += roomTotal;
 
             const bookingRes = await client.query(
-                `INSERT INTO bookings (member_id, room_id, check_in_date, check_out_date, booking_status, rent_type, hold_expires_at)
-                 VALUES ($1, $2, $3, $4, 'รอชำระมัดจำ', $5, NOW() + interval '5 minutes') RETURNING booking_id`,
+                `INSERT INTO bookings (member_id, room_id, check_in_date, check_out_date, booking_status, rent_type, hold_expires_at, booking_date)
+                 VALUES ($1, $2, $3, $4, 'รอชำระมัดจำ', $5, NOW() + interval '5 minutes', NOW())
+                 RETURNING booking_id, to_char(booking_date, 'YYYY-MM-DD"T"HH24:MI:SS') AS booked_at`,
                 [userId, roomId, startDate, endDate, rentType]
             );
             const bookingId = bookingRes.rows[0].booking_id;
+            if (!bookedAt) bookedAt = bookingRes.rows[0].booked_at; // ใช้เวลาจองของห้องแรกเป็นตัวแทนทั้งชุด
 
             await client.query(`UPDATE rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`, [roomId]);
 
@@ -322,6 +346,7 @@ exports.createBookingBatch = async (req, res) => {
             roomCount: bookings.length,
             checkInDate: startDate,
             checkOutDate: endDate,
+            bookedAt,
             nights: diffDays,
             rentType,
             totalPrice,
@@ -359,6 +384,7 @@ exports.checkbooking = async (req, res) => {
                 b.room_id        AS "roomId",
                 b.check_in_date  AS "startDate",
                 b.check_out_date AS "endDate",
+                to_char(b.booking_date, 'YYYY-MM-DD"T"HH24:MI:SS') AS "bookedAt",
                 b.booking_status AS "bookingStatus",
                 b.rent_type      AS "rentType",
                 r.room_number    AS "roomNumber",
