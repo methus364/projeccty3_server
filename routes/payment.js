@@ -12,6 +12,8 @@ const {
     pollQrStatus,
     omiseWebhook,
     payBookingNow,
+    payBatchNow,
+    createBatchPayment,
 } = require("../controllers/payment");
 const { authCheck, adminCheck } = require("../middleweres/authCheck");
 
@@ -51,6 +53,11 @@ router.post("/invoice/:id/qr-charge", authCheck, createQrCharge);
 router.get("/payment/:id/qr-status", authCheck, pollQrStatus);
 // Webhook จาก Omise (ไม่มี auth — เรียกจากภายนอก)
 router.post("/payment/omise-webhook", omiseWebhook);
+
+// Tenant/Admin: รวมจ่ายหลายห้องครั้งเดียว — ออก QR รวมยอด แล้วแนบสลิป 1 ใบปิดทุกบิล
+// (ต้องมาก่อน '/booking/:id/pay-now' ไม่งั้น 'batch' จะถูกจับเป็น :id)
+router.post("/booking/batch/pay-now", authCheck, payBatchNow);
+router.post("/payment/batch", authCheck, upload.single("slip"), createBatchPayment);
 
 // Tenant/Admin: จ่ายค่าจองตอนจองเลย (แบบ Agoda — เฉพาะรายวัน)
 router.post("/booking/:id/pay-now", authCheck, payBookingNow);

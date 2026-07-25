@@ -211,6 +211,133 @@ exports.createBooking = async (req, res) => {
 };
 
 // ==========================================
+// 1.5 จองห้องพักหลายห้องพร้อมกัน (createBookingBatch) — Tenant รายวันเท่านั้น
+//     ทำในทรานแซกชันเดียวแบบ all-or-nothing: ถ้ามีห้องใดจองไม่ได้ ยกเลิกทั้งชุด
+//     ใช้กับหน้าจองรายวันสไตล์ Agoda (เลือกหลายห้อง แล้วรวมจ่ายครั้งเดียว)
+// ==========================================
+exports.createBookingBatch = async (req, res) => {
+    const client = await pool.connect();
+    const { roomIds, startDate, endDate } = req.body;
+    const rentType = 'daily'; // batch รองรับเฉพาะรายวัน
+    const userId = req.user.id;
+
+    if (!Array.isArray(roomIds) || roomIds.length === 0) {
+        client.release();
+        return res.status(400).json({ success: false, message: "กรุณาเลือกห้องพักอย่างน้อย 1 ห้อง" });
+    }
+    if (!startDate || !endDate) {
+        client.release();
+        return res.status(400).json({ success: false, message: "กรุณาระบุวันเข้าพักและวันออก" });
+    }
+    // กันเลือกห้องซ้ำในคำขอเดียว
+    const uniqueRoomIds = [...new Set(roomIds.map(Number))];
+
+    try {
+        await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id);
+
+        // รายวันเท่านั้น — กันผู้เช่ารายเดือนมายิง batch (เช็คสดจาก DB เหมือน createBooking)
+        const freshRole = await getFreshUserRole(client, userId);
+        if (freshRole === "Monthly_Tenant") {
+            throw new Error("ผู้เช่ารายเดือนใช้การจองหลายห้องแบบรายวันไม่ได้");
+        }
+
+        const diffDays = Math.ceil(Math.abs(new Date(endDate) - new Date(startDate)) / 86400000) || 1;
+        const holdExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+
+        const bookings = [];
+        let totalPrice = 0;
+
+        for (const roomId of uniqueRoomIds) {
+            // ล็อกแถวห้อง (FOR UPDATE) + ดึงราคา/สถานะ กันสองคนจองห้องเดียวกันพร้อมกัน
+            const priceRes = await client.query(
+                `SELECT room_price, room_status, room_number, type_name FROM rooms WHERE room_id = $1 LIMIT 1 FOR UPDATE`,
+                [roomId]
+            );
+            if (priceRes.rows.length === 0) throw new Error(`ไม่พบข้อมูลห้องพัก (id ${roomId})`);
+            const { room_number, room_price, room_status, type_name } = priceRes.rows[0];
+            if (room_status === 'ปิดปรับปรุง') throw new Error(`ห้อง ${room_number} ปิดปรับปรุงอยู่ จองไม่ได้`);
+
+            // เช็กจองซ้อน (Overlap Booking Check)
+            const overlapRes = await client.query(
+                `SELECT booking_id FROM bookings
+                 WHERE room_id = $1 AND booking_status NOT IN ('ยกเลิก', 'ย้ายออกแล้ว')
+                 AND ($2 < check_out_date AND $3 > check_in_date) LIMIT 1`,
+                [roomId, startDate, endDate]
+            );
+            if (overlapRes.rows.length > 0) throw new Error(`ห้อง ${room_number} ถูกจองไปแล้วในช่วงเวลาที่เลือก`);
+
+            const roomTotal = diffDays * (room_price || 0);
+            totalPrice += roomTotal;
+
+            const bookingRes = await client.query(
+                `INSERT INTO bookings (member_id, room_id, check_in_date, check_out_date, booking_status, rent_type, hold_expires_at)
+                 VALUES ($1, $2, $3, $4, 'รอชำระมัดจำ', $5, NOW() + interval '5 minutes') RETURNING booking_id`,
+                [userId, roomId, startDate, endDate, rentType]
+            );
+            const bookingId = bookingRes.rows[0].booking_id;
+
+            await client.query(`UPDATE rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`, [roomId]);
+
+            bookings.push({
+                bookingId,
+                bookingRef: formatBookingRef(bookingId),
+                roomId,
+                roomNumber: room_number,
+                typeName: type_name,
+                roomTotal,
+            });
+        }
+
+        await client.query("COMMIT");
+
+        // ส่งอีเมลสรุปการจอง (นอก transaction, degrade graceful — ส่งไม่สำเร็จการจองยังถือว่าสำเร็จ)
+        const memberRes = await pool.query(
+            `SELECT email, full_name FROM members WHERE member_id = $1 LIMIT 1`,
+            [userId]
+        );
+        const member = memberRes.rows[0] || {};
+        let emailSent = false;
+        try {
+            const roomList = bookings.map((b) => `ห้อง ${b.roomNumber}`).join(", ");
+            const mailResult = await sendBookingConfirmation({
+                email: member.email,
+                fullName: member.full_name,
+                bookingRef: bookings.map((b) => b.bookingRef).join(", "),
+                roomNumber: roomList,
+                checkIn: startDate,
+                checkOut: endDate,
+                nights: diffDays,
+                totalPrice,
+                rentType,
+            });
+            emailSent = mailResult.sent;
+        } catch (e) {
+            emailSent = false;
+        }
+
+        res.status(201).json({
+            success: true,
+            bookings,
+            roomCount: bookings.length,
+            checkInDate: startDate,
+            checkOutDate: endDate,
+            nights: diffDays,
+            rentType,
+            totalPrice,
+            holdExpiresAt,
+            emailSent,
+        });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("Batch Booking Error:", error.message);
+        res.status(400).json({ success: false, message: error.message });
+    } finally {
+        client.release();
+    }
+};
+
+// ==========================================
 // 2. ตรวจสอบประวัติการจองของผู้ใช้ (checkbooking)
 // ==========================================
 exports.checkbooking = async (req, res) => {

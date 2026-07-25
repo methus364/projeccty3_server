@@ -775,5 +775,202 @@ exports.payBookingNow = async (req, res) => {
     }
 };
 
+// ==========================================
+// Helper: สร้าง/หาบิลค่าจองรายวันของ booking หนึ่ง (ใช้ในการรวมจ่ายหลายห้อง)
+//   ล็อกแถว booking, เช็คสิทธิ์+สถานะ, คิดยอด แล้วสร้าง invoice ถ้ายังไม่มี → คืน { invoiceId, total }
+//   client ต้องอยู่ใน transaction แล้ว
+// ==========================================
+async function _ensureDailyBookingInvoice(client, bookingId, userId, userRole) {
+    const bkRes = await client.query(
+        `SELECT b.booking_id, b.member_id, b.rent_type, b.booking_status,
+                b.check_in_date, b.check_out_date, r.room_price
+         FROM bookings b JOIN rooms r ON b.room_id = r.room_id
+         WHERE b.booking_id = $1 FOR UPDATE`,
+        [bookingId]
+    );
+    if (bkRes.rows.length === 0) throw new Error(`ไม่พบการจอง (id ${bookingId})`);
+    const bk = bkRes.rows[0];
+    if (userRole !== "Admin" && bk.member_id !== userId) throw new Error("ไม่มีสิทธิ์ชำระการจองนี้");
+    if (bk.rent_type !== "daily") throw new Error("การรวมจ่ายรองรับเฉพาะการจองรายวัน");
+    if (bk.booking_status !== "รอชำระมัดจำ") throw new Error(`การจอง ${bookingId} สถานะ "${bk.booking_status}" ไม่ต้องชำระซ้ำ`);
+
+    const nights = Math.ceil(Math.abs(new Date(bk.check_out_date) - new Date(bk.check_in_date)) / 86400000) || 1;
+    const total = nights * Number(bk.room_price || 0);
+    if (!(total > 0)) throw new Error("คำนวณยอดที่ต้องชำระไม่ได้");
+
+    // กันออกบิลซ้ำ — ถ้ามีบิลที่ยังไม่ถูกยกเลิกอยู่แล้วใช้ตัวเดิม
+    const existInv = await client.query(
+        `SELECT invoice_id FROM invoices WHERE booking_id = $1 AND invoice_status != 'ยกเลิก' LIMIT 1`,
+        [bookingId]
+    );
+    if (existInv.rows.length > 0) {
+        return { invoiceId: existInv.rows[0].invoice_id, total };
+    }
+
+    const today = new Date().toISOString().split("T")[0];
+    const invRes = await client.query(
+        `INSERT INTO invoices
+            (booking_id, invoice_date, due_date, room_cost, water_cost, elec_cost, total_amount, invoice_status, invoice_type)
+         VALUES ($1, $2, $2, $3, 0, 0, $3, 'ยังไม่ชำระ', 'rent')
+         RETURNING invoice_id`,
+        [bookingId, today, total]
+    );
+    const invoiceId = invRes.rows[0].invoice_id;
+    await client.query(
+        `INSERT INTO invoice_details (invoice_id, item_name, quantity, unit_price, subtotal)
+         VALUES
+            ($1, 'ค่าน้ำ (0 หน่วย)', 0, $2, 0),
+            ($1, 'ค่าไฟ (0 หน่วย)', 0, $3, 0),
+            ($1, $4, $5, $6, $7)`,
+        [invoiceId, WATER_RATE, ELEC_RATE, `ค่าห้องพักรายวัน (${nights} วัน)`, nights, bk.room_price, total]
+    );
+    return { invoiceId, total };
+}
+
+// ==========================================
+// รวมจ่ายหลายห้องครั้งเดียว — สร้างบิลของทุก booking แล้วออก QR รวมยอดเดียว
+//   POST /booking/batch/pay-now   body: { bookingIds: [] }
+// ==========================================
+exports.payBatchNow = async (req, res) => {
+    const client = await pool.connect();
+    const { bookingIds } = req.body;
+
+    if (!Array.isArray(bookingIds) || bookingIds.length === 0) {
+        client.release();
+        return res.status(400).json({ success: false, message: "ไม่มีรายการจองสำหรับชำระ" });
+    }
+
+    try {
+        await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id);
+
+        const invoiceIds = [];
+        let amount = 0;
+        for (const bid of [...new Set(bookingIds.map(Number))]) {
+            const { invoiceId, total } = await _ensureDailyBookingInvoice(client, bid, req.user.id, req.user.role);
+            invoiceIds.push(invoiceId);
+            amount += total;
+        }
+
+        await client.query("COMMIT");
+
+        // QR PromptPay static รวมยอดทุกห้อง (สแกนโอนครั้งเดียว)
+        const qr = await buildPromptpayQr(amount);
+
+        res.status(201).json({
+            success: true,
+            data: { invoiceIds, qrImage: qr.dataUrl, promptpayId: qr.promptpayId, amount },
+            message: "สร้าง QR รวมค่าจองสำเร็จ กรุณาโอนแล้วแนบสลิป",
+        });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("payBatchNow Error:", error.message);
+        res.status(400).json({ success: false, message: error.message });
+    } finally {
+        client.release();
+    }
+};
+
+// ==========================================
+// รวมจ่ายหลายห้องครั้งเดียว — แนบสลิป 1 ใบ ปิดทุกบิลพร้อมกัน
+//   POST /payment/batch  (multipart)  fields: invoice_ids (JSON array), slip
+// ==========================================
+exports.createBatchPayment = async (req, res) => {
+    const client = await pool.connect();
+    const method = "โอนเงิน";
+
+    let invoiceIds = [];
+    try {
+        invoiceIds = JSON.parse(req.body.invoice_ids || "[]");
+    } catch {
+        invoiceIds = [];
+    }
+
+    if (!Array.isArray(invoiceIds) || invoiceIds.length === 0) {
+        client.release();
+        return res.status(400).json({ success: false, message: "ไม่มีบิลสำหรับชำระ" });
+    }
+    if (!req.file) {
+        client.release();
+        return res.status(400).json({ success: false, message: "กรุณาแนบสลิปการโอนเงิน" });
+    }
+
+    try {
+        // ตรวจสลิปครั้งเดียว (รวมจ่าย) + อัปโหลดขึ้น storage แล้วใช้หลักฐานเดียวกันทุกบิล
+        const slipCheck = await verifySlipImage(req.file.buffer);
+        if (!slipCheck.ok) {
+            client.release();
+            return res.status(400).json({ success: false, message: slipCheck.reason });
+        }
+        const slipQrData = slipCheck.qrText;
+        const evidenceUrl = await uploadSlip(req.file.buffer, req.file.originalname, req.file.mimetype);
+
+        await client.query("BEGIN");
+        await setAuditUser(client, req.user?.id);
+
+        const confirmed = [];
+        for (const invId of [...new Set(invoiceIds.map(Number))]) {
+            await client.query(`SELECT invoice_id FROM invoices WHERE invoice_id = $1 FOR UPDATE`, [invId]);
+            const invoice = await _loadFullInvoice(client, invId);
+            if (!invoice) throw new Error(`ไม่พบบิล (id ${invId})`);
+            if (req.user.role !== "Admin" && invoice.member_id !== req.user.id) {
+                throw new Error("ไม่มีสิทธิ์ชำระบิลนี้");
+            }
+            if (invoice.invoice_status === "ชำระแล้ว") continue; // บิลที่จ่ายครบแล้วข้ามไป
+
+            const sumRes = await client.query(
+                `SELECT COALESCE(SUM(amount_paid), 0) AS paid_sum
+                 FROM payments WHERE invoice_id = $1 AND payment_status = 'ยืนยันแล้ว'`,
+                [invId]
+            );
+            const lateFee = invoice.invoice_status !== "ชำระแล้ว" ? _calculateLateFee(invoice.due_date) : 0;
+            const remaining = Number(invoice.total_amount) + lateFee - Number(sumRes.rows[0].paid_sum);
+            const payAmount = remaining > 0 ? remaining : Number(invoice.total_amount);
+
+            const payRes = await client.query(
+                `INSERT INTO payments (invoice_id, payment_method, amount_paid, payment_evidence, payment_status, slip_qr_data)
+                 VALUES ($1, $2, $3, $4, 'รอตรวจ', $5)
+                 RETURNING payment_id, invoice_id, payment_date, payment_method, amount_paid, payment_evidence, payment_status, slip_qr_data`,
+                [invId, method, payAmount, evidenceUrl, slipQrData]
+            );
+            const payment = payRes.rows[0];
+
+            // ส่งสลิปแล้ว → หยุด hold + ยืนยันการจองทันที (กัน cron ยกเลิก) เหมือน createPayment
+            const bookingUpdate = await client.query(
+                `UPDATE bookings SET booking_status = 'ยืนยันการจอง', hold_expires_at = NULL
+                 WHERE booking_id = (SELECT booking_id FROM invoices WHERE invoice_id = $1)
+                   AND booking_status = 'รอชำระมัดจำ'
+                 RETURNING booking_id`,
+                [invId]
+            );
+            if (bookingUpdate.rowCount > 0) confirmed.push({ invoiceId: invId, payment });
+        }
+
+        await client.query("COMMIT");
+
+        // ออกใบเสร็จต่อห้อง (best-effort นอก transaction — ล้มเหลวไม่ทำให้คำขอล้ม)
+        for (const { invoiceId, payment } of confirmed) {
+            try {
+                const fullInvoice = await _loadFullInvoice(pool, invoiceId);
+                await emailReceipt(fullInvoice, payment);
+            } catch (e) {
+                console.error("Batch receipt mail error:", e.message);
+            }
+        }
+
+        res.status(201).json({
+            success: true,
+            confirmedCount: confirmed.length,
+            message: "ชำระเงินรวมสำเร็จ ยืนยันการจองทุกห้องแล้ว",
+        });
+    } catch (error) {
+        try { await client.query("ROLLBACK"); } catch (e) { /* ignore */ }
+        console.error("createBatchPayment Error:", error.message);
+        res.status(400).json({ success: false, message: error.message });
+    } finally {
+        client.release();
+    }
+};
+
 // export helper เผื่อเขียน test
 exports._confirmPaymentPaid = confirmPaymentPaid;

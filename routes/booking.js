@@ -2,7 +2,7 @@ const express = require('express')
 const router = express.Router()
 const multer = require('multer')
 
-const { createBooking, checkbooking, editBooking, getAllBookings, adminCreateBooking, checkIn, checkOut, getBookingInvoices, quickMember, getAvailability } = require('../controllers/booking')
+const { createBooking, createBookingBatch, checkbooking, editBooking, getAllBookings, adminCreateBooking, checkIn, checkOut, getBookingInvoices, quickMember, getAvailability } = require('../controllers/booking')
 const { authCheck, tenantCheck, adminCheck } = require('../middleweres/authCheck')
 
 // รับไฟล์แนบตอนเช็คอิน (บัตร/รูปเงินสด/รูปสัญญา) ไว้ใน memory — เฉพาะรูป 5MB
@@ -23,6 +23,8 @@ const checkinUpload = upload.fields([
 
 // Tenant routes
 router.post('/booking', authCheck, tenantCheck, createBooking)
+// จองหลายห้องพร้อมกัน (รายวันสไตล์ Agoda — รวมจ่ายครั้งเดียว)
+router.post('/booking/batch', authCheck, tenantCheck, createBookingBatch)
 router.post('/checkbooking', authCheck, checkbooking)
 router.put('/editBooking/:id', authCheck, editBooking)
 router.get('/booking/:id/invoices', authCheck, getBookingInvoices)
