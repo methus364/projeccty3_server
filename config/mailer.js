@@ -24,6 +24,8 @@ function getTransporter() {
             port: 465,
             secure: true,
             auth: { user: MAIL_USER, pass: MAIL_PASS },
+            // บังคับใช้ IPv4 — Render ต่อ IPv6 ออกไป Gmail ไม่ได้ (ENETUNREACH) ทำให้ส่งไม่ออก
+            family: 4,
             // เปิด connection pool — reuse การเชื่อมต่อ Gmail ไม่ต้อง handshake ใหม่ทุกครั้ง (ส่งเร็วขึ้น)
             pool: true,
             maxConnections: 3,
