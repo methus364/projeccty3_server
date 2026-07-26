@@ -13,6 +13,60 @@ dns.setDefaultResultOrder("ipv4first");
 const MAIL_USER = process.env.MAIL_USER;
 const MAIL_PASS = process.env.MAIL_PASS;
 
+// Brevo (Sendinblue) HTTP API — ส่งอีเมลผ่าน HTTPS (พอร์ต 443)
+// จำเป็นเพราะ Render บล็อก outbound SMTP (พอร์ต 25/465/587) การส่งผ่าน SMTP จึง connect timeout
+// ถ้าตั้ง BREVO_API_KEY จะใช้ Brevo เป็นหลัก (โปรดัคชัน) — ถ้าไม่ตั้งจะ fallback ไป SMTP (ใช้ตอน dev)
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+// อีเมลผู้ส่ง — ต้องเป็น sender ที่ verify แล้วใน Brevo (ปกติใช้ Gmail เดียวกับ MAIL_USER)
+const MAIL_FROM = process.env.MAIL_FROM || MAIL_USER;
+const MAIL_FROM_NAME = "หอพัก Around Loei";
+
+// ส่งอีเมลผ่าน Brevo HTTP API
+// รองรับไฟล์แนบ (Brevo รับเป็น base64 ผ่านฟิลด์ attachment[].content)
+async function sendViaBrevo({ to, subject, text, attachments }) {
+    if (!MAIL_FROM) {
+        throw new Error("ยังไม่ได้ตั้งค่า MAIL_FROM / MAIL_USER (อีเมลผู้ส่งที่ verify ใน Brevo)");
+    }
+
+    const body = {
+        sender: { name: MAIL_FROM_NAME, email: MAIL_FROM },
+        to: [{ email: to }],
+        subject,
+        textContent: text,
+    };
+    if (attachments && attachments.length) {
+        body.attachment = attachments.map((a) => ({
+            name: a.filename,
+            content: Buffer.isBuffer(a.content) ? a.content.toString("base64") : Buffer.from(a.content).toString("base64"),
+        }));
+    }
+
+    // ใส่ timeout กันค้าง — ใช้ AbortController (Node 18+)
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    let res;
+    try {
+        res = await fetch("https://api.brevo.com/v3/smtp/email", {
+            method: "POST",
+            headers: {
+                "api-key": BREVO_API_KEY,
+                "Content-Type": "application/json",
+                accept: "application/json",
+            },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+        });
+    } finally {
+        clearTimeout(timer);
+    }
+
+    if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`Brevo API ${res.status}: ${detail.slice(0, 300)}`);
+    }
+    return res.json().catch(() => ({}));
+}
+
 // resolve smtp.gmail.com เป็น IPv4 เอง แล้วต่อตรงไปที่ IP นั้น
 // เหตุผล: บน Render การตั้ง family:4 / ipv4first ของ nodemailer ยังหลุดไปต่อ IPv6
 // (ENETUNREACH 2404:6800:...:465) — การ resolve IPv4 เองแล้วใช้ IP เป็น host คือทางที่ชัวร์สุด
@@ -81,26 +135,23 @@ async function sendWithRetry(mailOptions) {
 // ส่งอีเมลพร้อมแนบไฟล์ PDF
 // to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ, pdfBuffer: Buffer ของ PDF, filename: ชื่อไฟล์แนบ
 async function sendInvoiceMail({ to, subject, text, pdfBuffer, filename }) {
-    await sendWithRetry({
-        from: `หอพัก Around Loei <${MAIL_USER}>`,
-        to,
-        subject,
-        text,
-        attachments: [
-            { filename, content: pdfBuffer, contentType: "application/pdf" },
-        ],
-    });
+    const attachments = [{ filename, content: pdfBuffer, contentType: "application/pdf" }];
+    // โปรดัคชัน (Render): ใช้ Brevo HTTP API — dev: fallback เป็น SMTP
+    if (BREVO_API_KEY) {
+        await sendViaBrevo({ to, subject, text, attachments });
+        return;
+    }
+    await sendWithRetry({ from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text, attachments });
 }
 
-// ส่งอีเมลข้อความธรรมดา (ไม่มีไฟล์แนบ) — ใช้กับอีเมลยืนยันการจอง
+// ส่งอีเมลข้อความธรรมดา (ไม่มีไฟล์แนบ) — ใช้กับอีเมลยืนยันการจอง / OTP
 // to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ
 async function sendMail({ to, subject, text }) {
-    await sendWithRetry({
-        from: `หอพัก Around Loei <${MAIL_USER}>`,
-        to,
-        subject,
-        text,
-    });
+    if (BREVO_API_KEY) {
+        await sendViaBrevo({ to, subject, text });
+        return;
+    }
+    await sendWithRetry({ from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text });
 }
 
 module.exports = { sendInvoiceMail, sendMail };
