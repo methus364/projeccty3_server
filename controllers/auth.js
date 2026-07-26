@@ -2,6 +2,8 @@ const pool = require("../config/db");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const SECRET = require("../config/secret");
+const { sendMail } = require("../config/mailer");
+const { createOtp, verifyOtp, isVerified, clearOtp } = require("../utils/otpStore");
 
 // --- Register (สมัครสมาชิก) ---
 exports.register = async (req, res) => {
@@ -191,6 +193,131 @@ exports.deleteMember = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+// ============================================================
+//  ลืมรหัสผ่าน / แก้ไขข้อมูลผู้ใช้ ด้วย OTP ทางอีเมล
+// ============================================================
+
+// --- ส่งรหัส OTP ไปที่อีเมล ---
+// รับ { username, email } → ตรวจว่ามีสมาชิกนี้จริงและอีเมลตรงกัน แล้วส่ง OTP
+exports.sendOtp = async (req, res) => {
+  try {
+    const username = (req.body.username || "").trim();
+    const email = (req.body.email || "").trim();
+
+    if (!username || !email) {
+      return res.status(400).json({ success: false, message: "กรุณากรอกชื่อผู้ใช้และอีเมลให้ครบ" });
+    }
+
+    // ตรวจสอบว่ามีสมาชิกที่ username + email ตรงกันจริง (เทียบอีเมลแบบไม่สนตัวพิมพ์)
+    const { rows } = await pool.query(
+      'SELECT member_id, email FROM Members WHERE username = $1 LIMIT 1',
+      [username]
+    );
+    const user = rows[0];
+    if (!user || !user.email || user.email.trim().toLowerCase() !== email.toLowerCase()) {
+      // ไม่บอกชัดว่าอันไหนผิด เพื่อกันการเดาข้อมูลผู้ใช้ (account enumeration)
+      return res.status(400).json({ success: false, message: "ไม่พบชื่อผู้ใช้ที่ตรงกับอีเมลนี้" });
+    }
+
+    // สร้าง OTP แล้วส่งอีเมล
+    const code = createOtp(username, email);
+    try {
+      await sendMail({
+        to: user.email,
+        subject: "รหัส OTP สำหรับเปลี่ยนรหัสผ่าน — หอพัก Around Loei",
+        text:
+          `สวัสดีคุณ ${username}\n\n` +
+          `รหัส OTP สำหรับเปลี่ยนรหัสผ่านของคุณคือ: ${code}\n\n` +
+          `รหัสนี้จะหมดอายุใน 5 นาที กรุณาอย่าเปิดเผยรหัสนี้แก่ผู้อื่น\n` +
+          `หากคุณไม่ได้เป็นผู้ร้องขอ กรุณาเพิกเฉยต่ออีเมลฉบับนี้`,
+      });
+    } catch (mailErr) {
+      console.error("Send OTP mail error:", mailErr);
+      return res.status(502).json({ success: false, message: "ส่งอีเมลไม่สำเร็จ กรุณาลองใหม่อีกครั้ง" });
+    }
+
+    res.json({ success: true, message: "ส่งรหัส OTP ไปที่อีเมลของคุณแล้ว" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์" });
+  }
+};
+
+// --- ตรวจสอบรหัส OTP ---
+// รับ { username, email, otp }
+exports.verifyOtp = async (req, res) => {
+  try {
+    const username = (req.body.username || "").trim();
+    const email = (req.body.email || "").trim();
+    const otp = (req.body.otp || "").trim();
+
+    if (!username || !email || !otp) {
+      return res.status(400).json({ success: false, message: "ข้อมูลไม่ครบถ้วน" });
+    }
+
+    const result = verifyOtp(username, email, otp);
+    if (!result.ok) {
+      const messages = {
+        expired: "รหัส OTP หมดอายุแล้ว กรุณาขอรหัสใหม่",
+        too_many_attempts: "กรอกรหัสผิดหลายครั้งเกินไป กรุณาขอรหัสใหม่",
+        invalid: "รหัส OTP ไม่ถูกต้อง",
+      };
+      return res.status(400).json({ success: false, message: messages[result.reason] || "รหัส OTP ไม่ถูกต้อง" });
+    }
+
+    res.json({ success: true, message: "ยืนยันรหัส OTP สำเร็จ" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์" });
+  }
+};
+
+// --- ตั้งรหัสผ่านใหม่ (ต้องยืนยัน OTP สำเร็จมาก่อน) ---
+// รับ { username, email, newPassword }
+exports.resetPassword = async (req, res) => {
+  try {
+    const username = (req.body.username || "").trim();
+    const email = (req.body.email || "").trim();
+    const newPassword = req.body.newPassword || "";
+
+    if (!username || !email || !newPassword) {
+      return res.status(400).json({ success: false, message: "ข้อมูลไม่ครบถ้วน" });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร" });
+    }
+
+    // ต้องผ่านการยืนยัน OTP มาก่อนเท่านั้น (กันการตั้งรหัสผ่านโดยไม่ยืนยันตัวตน)
+    if (!isVerified(username, email)) {
+      return res.status(403).json({ success: false, message: "กรุณายืนยันรหัส OTP ก่อนตั้งรหัสผ่านใหม่" });
+    }
+
+    // ยืนยันอีกครั้งว่าสมาชิกยังมีอยู่จริง
+    const { rows } = await pool.query(
+      'SELECT member_id, email FROM Members WHERE username = $1 LIMIT 1',
+      [username]
+    );
+    const user = rows[0];
+    if (!user || !user.email || user.email.trim().toLowerCase() !== email.toLowerCase()) {
+      return res.status(400).json({ success: false, message: "ไม่พบชื่อผู้ใช้ที่ตรงกับอีเมลนี้" });
+    }
+
+    const hashPassword = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      'UPDATE Members SET password = $1 WHERE member_id = $2',
+      [hashPassword, user.member_id]
+    );
+
+    // ใช้ OTP ครั้งเดียวแล้วทิ้ง
+    clearOtp(username, email);
+
+    res.json({ success: true, message: "เปลี่ยนรหัสผ่านเรียบร้อยแล้ว" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์" });
   }
 };
 

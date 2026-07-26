@@ -53,6 +53,9 @@ app.use('/api', (req, res, next) => {
 // ใช้ rate limit กับ auth route
 app.use('/api/login', authLimiter);
 app.use('/api/register', authLimiter);
+app.use('/api/auth/send-otp', authLimiter);
+app.use('/api/auth/verify-otp', authLimiter);
+app.use('/api/auth/reset-password', authLimiter);
 
 app.get('/', (req, res) => {
   res.send('Hello World');
