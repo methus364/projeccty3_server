@@ -26,7 +26,11 @@ const SMTP_HOST = "smtp.gmail.com";
 async function resolveIpv4(host) {
     try {
         const addrs = await dnsp.resolve4(host);
-        if (addrs && addrs.length) return addrs[0];
+        if (addrs && addrs.length) {
+            // สุ่มเลือก IP — Gmail มีหลาย IP บางตัวอาจถูก throttle/ต่อช้าจาก Render
+            // การสุ่มทำให้ retry แต่ละรอบมีโอกาสเจอ IP ที่ต่อติด
+            return addrs[Math.floor(Math.random() * addrs.length)];
+        }
     } catch (_) { /* ตกไปใช้ lookup family:4 ด้านล่าง */ }
     // สำรอง: lookup แบบบังคับ IPv4
     const { address } = await dnsp.lookup(host, { family: 4 });
@@ -54,10 +58,11 @@ async function getTransporter() {
             // ปิด connection pool — บน Render socket ที่ค้างไว้มัก stale ทำให้ send ครั้งถัดไป
             // ค้างยาวจน timeout การเปิดต่อใหม่ทุกครั้งเสถียรกว่าสำหรับปริมาณอีเมลน้อยๆ (OTP/บิล)
             pool: false,
-            // timeout เผื่อ Render outbound ไป Gmail ช้า (เคยเจอ Connection timeout เป็นครั้งคราว)
-            connectionTimeout: 30000, // รอเชื่อมต่อ SMTP สูงสุด 30 วิ
-            greetingTimeout: 30000,   // รอ greeting จากเซิร์ฟเวอร์สูงสุด 30 วิ
-            socketTimeout: 30000,     // ไม่มีข้อมูลวิ่งเกิน 30 วิ = ตัดทิ้ง
+            // timeout สั้นลง — ถ้า IP ตัวนี้ต่อไม่ติดใน 15 วิ ให้รีบ fail ไปสุ่ม IP ใหม่ตอน retry
+            // ดีกว่ารอนานต่อ IP เดิมที่ค้าง (รวมทุก retry แล้วยังอยู่ในเวลาที่ frontend รอไหว)
+            connectionTimeout: 15000, // รอเชื่อมต่อ SMTP สูงสุด 15 วิ
+            greetingTimeout: 15000,   // รอ greeting จากเซิร์ฟเวอร์สูงสุด 15 วิ
+            socketTimeout: 20000,     // ไม่มีข้อมูลวิ่งเกิน 20 วิ = ตัดทิ้ง
         });
     }
     return transporter;
