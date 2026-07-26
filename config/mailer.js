@@ -13,9 +13,6 @@ dns.setDefaultResultOrder("ipv4first");
 const MAIL_USER = process.env.MAIL_USER;
 const MAIL_PASS = process.env.MAIL_PASS;
 
-// สร้าง transporter เพียงครั้งเดียว (lazy) เพื่อ reuse connection pool
-let transporter = null;
-
 // resolve smtp.gmail.com เป็น IPv4 เอง แล้วต่อตรงไปที่ IP นั้น
 // เหตุผล: บน Render การตั้ง family:4 / ipv4first ของ nodemailer ยังหลุดไปต่อ IPv6
 // (ENETUNREACH 2404:6800:...:465) — การ resolve IPv4 เองแล้วใช้ IP เป็น host คือทางที่ชัวร์สุด
@@ -37,50 +34,45 @@ async function resolveIpv4(host) {
     return address;
 }
 
-async function getTransporter() {
-    // ตรวจค่า env ตอนใช้งานจริง — ไม่ throw ตอน require เพื่อให้ server ที่ยังไม่ใช้อีเมลรันได้
+// สร้าง transporter สำหรับพอร์ตที่ระบุ (ไม่ cache — ปริมาณอีเมลน้อย สร้างใหม่ทุกครั้งเสถียรกว่า)
+// port 465 = SSL ตรง (secure:true), port 587 = STARTTLS (secure:false + requireTLS)
+async function buildTransporter(port) {
     if (!MAIL_USER || !MAIL_PASS) {
         throw new Error("ยังไม่ได้ตั้งค่า MAIL_USER / MAIL_PASS ใน server/.env (ต้องใช้ Gmail App Password)");
     }
 
-    if (!transporter) {
-        const ipv4 = await resolveIpv4(SMTP_HOST);
-        // ระบุ host เป็น IPv4 ตรงๆ แทน service:"gmail" — เลี่ยงทั้งพอร์ตบล็อกและ IPv6
-        // ใช้พอร์ต 465 (SSL) ซึ่ง Render อนุญาต outbound ได้ปกติ
-        transporter = nodemailer.createTransport({
-            host: ipv4,
-            port: 465,
-            secure: true,
-            auth: { user: MAIL_USER, pass: MAIL_PASS },
-            // host เป็น IP แล้ว จึงต้องบอกชื่อโดเมนจริงให้ TLS ตรวจใบรับรองให้ถูกต้อง
-            tls: { servername: SMTP_HOST },
-            family: 4,
-            // ปิด connection pool — บน Render socket ที่ค้างไว้มัก stale ทำให้ send ครั้งถัดไป
-            // ค้างยาวจน timeout การเปิดต่อใหม่ทุกครั้งเสถียรกว่าสำหรับปริมาณอีเมลน้อยๆ (OTP/บิล)
-            pool: false,
-            // timeout สั้นลง — ถ้า IP ตัวนี้ต่อไม่ติดใน 15 วิ ให้รีบ fail ไปสุ่ม IP ใหม่ตอน retry
-            // ดีกว่ารอนานต่อ IP เดิมที่ค้าง (รวมทุก retry แล้วยังอยู่ในเวลาที่ frontend รอไหว)
-            connectionTimeout: 15000, // รอเชื่อมต่อ SMTP สูงสุด 15 วิ
-            greetingTimeout: 15000,   // รอ greeting จากเซิร์ฟเวอร์สูงสุด 15 วิ
-            socketTimeout: 20000,     // ไม่มีข้อมูลวิ่งเกิน 20 วิ = ตัดทิ้ง
-        });
-    }
-    return transporter;
+    const ipv4 = await resolveIpv4(SMTP_HOST);
+    return nodemailer.createTransport({
+        host: ipv4,           // ใช้ IPv4 ตรงๆ — เลี่ยง ENETUNREACH ผ่าน IPv6 บน Render
+        port,
+        secure: port === 465, // 465 = SSL, 587 = STARTTLS
+        requireTLS: port === 587,
+        auth: { user: MAIL_USER, pass: MAIL_PASS },
+        tls: { servername: SMTP_HOST }, // host เป็น IP จึงต้องบอกชื่อโดเมนจริงให้ TLS ตรวจใบรับรอง
+        family: 4,
+        pool: false,
+        connectionTimeout: 15000, // รอเชื่อมต่อ SMTP สูงสุด 15 วิ
+        greetingTimeout: 15000,
+        socketTimeout: 20000,
+    });
 }
 
-// ส่งอีเมลพร้อม retry — Render ต่อ Gmail หลุด/ช้าเป็นครั้งคราว ลองซ้ำช่วยให้สำเร็จมากขึ้น
-async function sendWithRetry(mailOptions, retries = 2) {
+// ส่งอีเมลพร้อม retry + สลับพอร์ต — Render ต่อ Gmail หลุด/ช้าเป็นครั้งคราว และบางพอร์ตอาจถูกบล็อก
+// ลองสลับ 465 → 587 → 465 (แต่ละครั้งสุ่ม IP ใหม่ด้วย) เพื่อเพิ่มโอกาสต่อติด
+async function sendWithRetry(mailOptions) {
+    const portSequence = [465, 587, 465];
     let lastErr;
-    for (let attempt = 0; attempt <= retries; attempt++) {
+    for (let i = 0; i < portSequence.length; i++) {
+        const port = portSequence[i];
         try {
-            const mailer = await getTransporter();
-            return await mailer.sendMail(mailOptions);
+            const mailer = await buildTransporter(port);
+            const info = await mailer.sendMail(mailOptions);
+            mailer.close();
+            return info;
         } catch (err) {
             lastErr = err;
-            console.error(`sendMail attempt ${attempt + 1} failed:`, err && err.message);
-            // ถ้า transporter น่าจะเสีย ให้ทิ้งแล้วสร้างใหม่ในรอบถัดไป
-            transporter = null;
-            if (attempt < retries) await new Promise((r) => setTimeout(r, 1500));
+            console.error(`sendMail attempt ${i + 1} (port ${port}) failed:`, err && err.message);
+            if (i < portSequence.length - 1) await new Promise((r) => setTimeout(r, 1000));
         }
     }
     throw lastErr;
