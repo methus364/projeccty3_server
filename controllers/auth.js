@@ -219,7 +219,11 @@ exports.sendOtp = async (req, res) => {
     const user = rows[0];
     if (!user || !user.email || user.email.trim().toLowerCase() !== email.toLowerCase()) {
       // ไม่บอกชัดว่าอันไหนผิด เพื่อกันการเดาข้อมูลผู้ใช้ (account enumeration)
-      return res.status(400).json({ success: false, message: "ไม่พบชื่อผู้ใช้ที่ตรงกับอีเมลนี้" });
+      return res.status(400).json({
+        success: false,
+        message: "ไม่พบชื่อผู้ใช้ที่ตรงกับอีเมลนี้",
+        debug: { usernameFound: !!user, hasEmailOnFile: !!(user && user.email), emailMatches: false },
+      });
     }
 
     // สร้าง OTP แล้วส่งอีเมล
