@@ -211,9 +211,10 @@ exports.sendOtp = async (req, res) => {
       return res.status(400).json({ success: false, message: "กรุณากรอกชื่อผู้ใช้และอีเมลให้ครบ" });
     }
 
-    // ตรวจสอบว่ามีสมาชิกที่ username + email ตรงกันจริง (เทียบอีเมลแบบไม่สนตัวพิมพ์)
+    // ตรวจสอบว่ามีสมาชิกที่ username + email ตรงกันจริง
+    // เทียบ username แบบไม่สนตัวพิมพ์ + ตัดช่องว่างทั้งสองฝั่ง (กันกรณี DB เก็บ "Kimkim"/"kimkim ")
     const { rows } = await pool.query(
-      'SELECT member_id, email FROM Members WHERE username = $1 LIMIT 1',
+      'SELECT member_id, email FROM Members WHERE LOWER(BTRIM(username)) = LOWER(BTRIM($1)) LIMIT 1',
       [username]
     );
     const user = rows[0];
@@ -299,9 +300,9 @@ exports.resetPassword = async (req, res) => {
       return res.status(403).json({ success: false, message: "กรุณายืนยันรหัส OTP ก่อนตั้งรหัสผ่านใหม่" });
     }
 
-    // ยืนยันอีกครั้งว่าสมาชิกยังมีอยู่จริง
+    // ยืนยันอีกครั้งว่าสมาชิกยังมีอยู่จริง (เทียบ username แบบเดียวกับ send-otp)
     const { rows } = await pool.query(
-      'SELECT member_id, email FROM Members WHERE username = $1 LIMIT 1',
+      'SELECT member_id, email FROM Members WHERE LOWER(BTRIM(username)) = LOWER(BTRIM($1)) LIMIT 1',
       [username]
     );
     const user = rows[0];
