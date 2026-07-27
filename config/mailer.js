@@ -52,35 +52,23 @@ async function sendViaMailjet({ to, subject, text, attachments }) {
     // auth แบบ Basic: base64(APIKEY:SECRETKEY)
     const auth = Buffer.from(`${MAILJET_API_KEY}:${MAILJET_SECRET_KEY}`).toString("base64");
     const payload = JSON.stringify({ Messages: [message] });
+    const headers = { Authorization: `Basic ${auth}`, "Content-Type": "application/json" };
 
-    // retry เมื่อเจอ network error (ECONNRESET/fetch failed) — บน Render ต่อ Mailjet ถูกรีเซ็ตเป็นครั้งคราว
+    // retry เมื่อเจอ network error (ECONNRESET ฯลฯ) — ใช้ https + IPv4 เลี่ยงปัญหา IPv6 บน Render
     let lastErr;
     for (let attempt = 0; attempt < 3; attempt++) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 20000);
         try {
-            const res = await fetch("https://api.mailjet.com/v3.1/send", {
-                method: "POST",
-                headers: {
-                    Authorization: `Basic ${auth}`,
-                    "Content-Type": "application/json",
-                },
-                body: payload,
-                signal: controller.signal,
-            });
-            if (!res.ok) {
-                const detail = await res.text().catch(() => "");
-                throw new Error(`Mailjet API ${res.status}: ${detail.slice(0, 300)}`);
+            const res = await postJsonIpv4("https://api.mailjet.com/v3.1/send", headers, payload);
+            if (res.status < 200 || res.status >= 300) {
+                throw new Error(`Mailjet API ${res.status}: ${String(res.text).slice(0, 300)}`);
             }
-            return res.json().catch(() => ({}));
+            return JSON.parse(res.text || "{}");
         } catch (err) {
             lastErr = err;
             // ถ้าเป็น HTTP error (ไม่ใช่ network) ไม่ต้อง retry — โยนทันที
             if (String(err.message || "").startsWith("Mailjet API ")) throw err;
-            console.error(`Mailjet attempt ${attempt + 1} network error:`, err?.cause?.code || err?.message);
+            console.error(`Mailjet attempt ${attempt + 1} network error:`, err?.code || err?.message);
             await new Promise((r) => setTimeout(r, 1200));
-        } finally {
-            clearTimeout(timer);
         }
     }
     throw lastErr;
@@ -173,7 +161,38 @@ async function sendViaBrevo({ to, subject, text, attachments }) {
 // (ENETUNREACH 2404:6800:...:465) — การ resolve IPv4 เองแล้วใช้ IP เป็น host คือทางที่ชัวร์สุด
 // พร้อมตั้ง tls.servername = smtp.gmail.com เพื่อให้ใบรับรอง TLS ยัง verify ผ่าน
 const dnsp = require("dns").promises;
+const https = require("https");
 const SMTP_HOST = "smtp.gmail.com";
+
+// POST JSON ผ่าน Node https module โดยบังคับ IPv4 (family:4)
+// เหตุผล: undici/fetch บน Render พยายามต่อ IPv6 ไปบาง API (เช่น Mailjet) แล้วถูกรีเซ็ต (ECONNRESET)
+// https.request + family:4 ต่อ IPv4 ตรงๆ พร้อม SNI ที่ถูกต้อง เลี่ยงปัญหานี้
+function postJsonIpv4(urlStr, headers, bodyStr) {
+    return new Promise((resolve, reject) => {
+        const u = new URL(urlStr);
+        const data = Buffer.from(bodyStr);
+        const req = https.request(
+            {
+                host: u.hostname,
+                path: u.pathname + u.search,
+                method: "POST",
+                family: 4,
+                headers: { ...headers, "Content-Length": data.length },
+                timeout: 20000,
+            },
+            (res) => {
+                let chunks = "";
+                res.setEncoding("utf8");
+                res.on("data", (c) => (chunks += c));
+                res.on("end", () => resolve({ status: res.statusCode, text: chunks }));
+            }
+        );
+        req.on("error", reject);
+        req.on("timeout", () => req.destroy(new Error("Request timeout")));
+        req.write(data);
+        req.end();
+    });
+}
 
 async function resolveIpv4(host) {
     try {
