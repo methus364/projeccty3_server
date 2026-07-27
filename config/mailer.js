@@ -263,8 +263,8 @@ async function sendWithRetry(mailOptions) {
 async function sendInvoiceMail({ to, subject, text, pdfBuffer, filename }) {
     const attachments = [{ filename, content: pdfBuffer, contentType: "application/pdf" }];
     // ลำดับ: Mailjet → Resend → Brevo → SMTP (dev) — ตัวไหนตั้ง key ไว้ใช้ตัวนั้น
-    if (MAILJET_API_KEY && MAILJET_SECRET_KEY) return void (await sendViaMailjet({ to, subject, text, attachments }));
     if (RESEND_API_KEY) return void (await sendViaResend({ to, subject, text, attachments }));
+    if (MAILJET_API_KEY && MAILJET_SECRET_KEY) return void (await sendViaMailjet({ to, subject, text, attachments }));
     if (BREVO_API_KEY) return void (await sendViaBrevo({ to, subject, text, attachments }));
     await sendWithRetry({ from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text, attachments });
 }
@@ -272,8 +272,8 @@ async function sendInvoiceMail({ to, subject, text, pdfBuffer, filename }) {
 // ส่งอีเมลข้อความธรรมดา (ไม่มีไฟล์แนบ) — ใช้กับอีเมลยืนยันการจอง / OTP
 // to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ
 async function sendMail({ to, subject, text }) {
-    if (MAILJET_API_KEY && MAILJET_SECRET_KEY) return void (await sendViaMailjet({ to, subject, text }));
     if (RESEND_API_KEY) return void (await sendViaResend({ to, subject, text }));
+    if (MAILJET_API_KEY && MAILJET_SECRET_KEY) return void (await sendViaMailjet({ to, subject, text }));
     if (BREVO_API_KEY) return void (await sendViaBrevo({ to, subject, text }));
     await sendWithRetry({ from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text });
 }

@@ -247,7 +247,7 @@ exports.sendOtp = async (req, res) => {
       });
     } catch (mailErr) {
       console.error("Send OTP mail error:", mailErr);
-      return res.status(502).json({ success: false, message: "ส่งอีเมลไม่สำเร็จ กรุณาลองใหม่อีกครั้ง", debug: String(mailErr && mailErr.message || mailErr) + " | cause: " + String(mailErr?.cause?.code || mailErr?.cause?.message || mailErr?.cause || "-") });
+      return res.status(502).json({ success: false, message: "ส่งอีเมลไม่สำเร็จ กรุณาลองใหม่อีกครั้ง" });
     }
 
     res.json({ success: true, message: "ส่งรหัส OTP ไปที่อีเมลของคุณแล้ว" });
