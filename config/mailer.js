@@ -52,7 +52,13 @@ async function sendViaMailjet({ to, subject, text, attachments }) {
     // auth แบบ Basic: base64(APIKEY:SECRETKEY)
     const auth = Buffer.from(`${MAILJET_API_KEY}:${MAILJET_SECRET_KEY}`).toString("base64");
     const payload = JSON.stringify({ Messages: [message] });
-    const headers = { Authorization: `Basic ${auth}`, "Content-Type": "application/json" };
+    const headers = {
+        Authorization: `Basic ${auth}`,
+        "Content-Type": "application/json",
+        // บาง WAF หน้า Mailjet รีเซ็ตคำขอที่ไม่มี User-Agent (คำขอจาก cloud server) — ใส่ให้ดูเหมือน client ปกติ
+        "User-Agent": "AroundLoei-Server/1.0",
+        Accept: "application/json",
+    };
 
     // retry เมื่อเจอ network error (ECONNRESET ฯลฯ) — ใช้ https + IPv4 เลี่ยงปัญหา IPv6 บน Render
     let lastErr;
