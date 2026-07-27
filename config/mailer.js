@@ -24,9 +24,58 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 // ต้องมีทั้ง API key (public) และ Secret key
 const MAILJET_API_KEY = process.env.MAILJET_API_KEY;
 const MAILJET_SECRET_KEY = process.env.MAILJET_SECRET_KEY;
+// SendGrid HTTP API — Render ต่อได้ (Mailjet ต่อไม่ได้) ส่งหาอีเมลใครก็ได้ โดย verify แค่ single sender
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 // อีเมลผู้ส่ง — ต้องเป็น sender ที่ verify แล้ว (Mailjet/Brevo) / Resend ยังไม่ verify โดเมน = onboarding@resend.dev
 const MAIL_FROM = process.env.MAIL_FROM || MAIL_USER;
 const MAIL_FROM_NAME = "หอพัก Around Loei";
+
+// ส่งอีเมลผ่าน SendGrid HTTP API (https://api.sendgrid.com/v3/mail/send)
+// verify แค่ single sender ก็ส่งหาผู้รับใครก็ได้ (ไม่ต้องมีโดเมน) — ใช้ https+IPv4 ที่ Render ต่อได้
+async function sendViaSendgrid({ to, subject, text, attachments }) {
+    if (!MAIL_FROM) {
+        throw new Error("ยังไม่ได้ตั้งค่า MAIL_FROM / MAIL_USER (single sender ที่ verify ใน SendGrid)");
+    }
+
+    const body = {
+        personalizations: [{ to: [{ email: to }] }],
+        from: { email: MAIL_FROM, name: MAIL_FROM_NAME },
+        subject,
+        content: [{ type: "text/plain", value: text }],
+    };
+    if (attachments && attachments.length) {
+        body.attachments = attachments.map((a) => ({
+            content: Buffer.isBuffer(a.content) ? a.content.toString("base64") : Buffer.from(a.content).toString("base64"),
+            filename: a.filename,
+            type: a.contentType || "application/octet-stream",
+            disposition: "attachment",
+        }));
+    }
+
+    const headers = {
+        Authorization: `Bearer ${SENDGRID_API_KEY}`,
+        "Content-Type": "application/json",
+        "User-Agent": "AroundLoei-Server/1.0",
+    };
+
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            const res = await postJsonIpv4("https://api.sendgrid.com/v3/mail/send", headers, JSON.stringify(body));
+            // SendGrid ส่งสำเร็จ = 202 Accepted (ไม่มี body)
+            if (res.status < 200 || res.status >= 300) {
+                throw new Error(`SendGrid API ${res.status}: ${String(res.text).slice(0, 300)}`);
+            }
+            return {};
+        } catch (err) {
+            lastErr = err;
+            if (String(err.message || "").startsWith("SendGrid API ")) throw err;
+            console.error(`SendGrid attempt ${attempt + 1} network error:`, err?.code || err?.message);
+            await new Promise((r) => setTimeout(r, 1200));
+        }
+    }
+    throw lastErr;
+}
 
 // ส่งอีเมลผ่าน Mailjet HTTP API (https://api.mailjet.com/v3.1/send)
 // verify แค่อีเมลผู้ส่ง ก็ส่งหาผู้รับใครก็ได้ (ไม่ต้องมีโดเมน)
@@ -262,7 +311,8 @@ async function sendWithRetry(mailOptions) {
 // to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ, pdfBuffer: Buffer ของ PDF, filename: ชื่อไฟล์แนบ
 async function sendInvoiceMail({ to, subject, text, pdfBuffer, filename }) {
     const attachments = [{ filename, content: pdfBuffer, contentType: "application/pdf" }];
-    // ลำดับ: Mailjet → Resend → Brevo → SMTP (dev) — ตัวไหนตั้ง key ไว้ใช้ตัวนั้น
+    // ลำดับ: SendGrid → Resend → Mailjet → Brevo → SMTP (dev) — ตัวไหนตั้ง key ไว้ใช้ตัวนั้น
+    if (SENDGRID_API_KEY) return void (await sendViaSendgrid({ to, subject, text, attachments }));
     if (RESEND_API_KEY) return void (await sendViaResend({ to, subject, text, attachments }));
     if (MAILJET_API_KEY && MAILJET_SECRET_KEY) return void (await sendViaMailjet({ to, subject, text, attachments }));
     if (BREVO_API_KEY) return void (await sendViaBrevo({ to, subject, text, attachments }));
@@ -272,6 +322,7 @@ async function sendInvoiceMail({ to, subject, text, pdfBuffer, filename }) {
 // ส่งอีเมลข้อความธรรมดา (ไม่มีไฟล์แนบ) — ใช้กับอีเมลยืนยันการจอง / OTP
 // to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ
 async function sendMail({ to, subject, text }) {
+    if (SENDGRID_API_KEY) return void (await sendViaSendgrid({ to, subject, text }));
     if (RESEND_API_KEY) return void (await sendViaResend({ to, subject, text }));
     if (MAILJET_API_KEY && MAILJET_SECRET_KEY) return void (await sendViaMailjet({ to, subject, text }));
     if (BREVO_API_KEY) return void (await sendViaBrevo({ to, subject, text }));
