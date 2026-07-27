@@ -17,9 +17,48 @@ const MAIL_PASS = process.env.MAIL_PASS;
 // จำเป็นเพราะ Render บล็อก outbound SMTP (พอร์ต 25/465/587) การส่งผ่าน SMTP จึง connect timeout
 // ถ้าตั้ง BREVO_API_KEY จะใช้ Brevo เป็นหลัก (โปรดัคชัน) — ถ้าไม่ตั้งจะ fallback ไป SMTP (ใช้ตอน dev)
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
-// อีเมลผู้ส่ง — ต้องเป็น sender ที่ verify แล้วใน Brevo (ปกติใช้ Gmail เดียวกับ MAIL_USER)
+// Resend HTTP API — ทางเลือกที่ใช้ได้ทันทีหลังสมัคร (ไม่มีด่านรอ activation แบบ Brevo)
+// ถ้าไม่ verify โดเมน จะส่งได้เฉพาะอีเมลเจ้าของบัญชี และ from ต้องเป็น onboarding@resend.dev
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+// อีเมลผู้ส่ง — Brevo: ต้องเป็น sender ที่ verify แล้ว / Resend (ยังไม่ verify โดเมน): บังคับ onboarding@resend.dev
 const MAIL_FROM = process.env.MAIL_FROM || MAIL_USER;
 const MAIL_FROM_NAME = "หอพัก Around Loei";
+
+// ส่งอีเมลผ่าน Resend HTTP API (https://api.resend.com/emails)
+async function sendViaResend({ to, subject, text, attachments }) {
+    // ยังไม่ verify โดเมน → from ต้องเป็น onboarding@resend.dev (ตั้ง RESEND_FROM ทับได้ถ้ามีโดเมนแล้ว)
+    const from = process.env.RESEND_FROM || `${MAIL_FROM_NAME} <onboarding@resend.dev>`;
+    const body = { from, to: [to], subject, text };
+    if (attachments && attachments.length) {
+        body.attachments = attachments.map((a) => ({
+            filename: a.filename,
+            content: Buffer.isBuffer(a.content) ? a.content.toString("base64") : Buffer.from(a.content).toString("base64"),
+        }));
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    let res;
+    try {
+        res = await fetch("https://api.resend.com/emails", {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${RESEND_API_KEY}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+        });
+    } finally {
+        clearTimeout(timer);
+    }
+
+    if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`Resend API ${res.status}: ${detail.slice(0, 300)}`);
+    }
+    return res.json().catch(() => ({}));
+}
 
 // ส่งอีเมลผ่าน Brevo HTTP API
 // รองรับไฟล์แนบ (Brevo รับเป็น base64 ผ่านฟิลด์ attachment[].content)
@@ -136,21 +175,17 @@ async function sendWithRetry(mailOptions) {
 // to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ, pdfBuffer: Buffer ของ PDF, filename: ชื่อไฟล์แนบ
 async function sendInvoiceMail({ to, subject, text, pdfBuffer, filename }) {
     const attachments = [{ filename, content: pdfBuffer, contentType: "application/pdf" }];
-    // โปรดัคชัน (Render): ใช้ Brevo HTTP API — dev: fallback เป็น SMTP
-    if (BREVO_API_KEY) {
-        await sendViaBrevo({ to, subject, text, attachments });
-        return;
-    }
+    // ลำดับ: Resend → Brevo → SMTP (dev) — ตัวไหนตั้ง key ไว้ใช้ตัวนั้น
+    if (RESEND_API_KEY) return void (await sendViaResend({ to, subject, text, attachments }));
+    if (BREVO_API_KEY) return void (await sendViaBrevo({ to, subject, text, attachments }));
     await sendWithRetry({ from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text, attachments });
 }
 
 // ส่งอีเมลข้อความธรรมดา (ไม่มีไฟล์แนบ) — ใช้กับอีเมลยืนยันการจอง / OTP
 // to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ
 async function sendMail({ to, subject, text }) {
-    if (BREVO_API_KEY) {
-        await sendViaBrevo({ to, subject, text });
-        return;
-    }
+    if (RESEND_API_KEY) return void (await sendViaResend({ to, subject, text }));
+    if (BREVO_API_KEY) return void (await sendViaBrevo({ to, subject, text }));
     await sendWithRetry({ from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text });
 }
 
