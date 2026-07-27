@@ -220,7 +220,17 @@ exports.sendOtp = async (req, res) => {
     const user = rows[0];
     if (!user || !user.email || user.email.trim().toLowerCase() !== email.toLowerCase()) {
       // ไม่บอกชัดว่าอันไหนผิด เพื่อกันการเดาข้อมูลผู้ใช้ (account enumeration)
-      return res.status(400).json({ success: false, message: "ไม่พบชื่อผู้ใช้ที่ตรงกับอีเมลนี้" });
+      const mask = (e) => {
+        if (!e) return null;
+        const [loc, dom] = String(e).trim().split("@");
+        if (!dom) return "***";
+        return `${loc.slice(0, 2)}***@${dom}`;
+      };
+      return res.status(400).json({
+        success: false,
+        message: "ไม่พบชื่อผู้ใช้ที่ตรงกับอีเมลนี้",
+        debug: { usernameFound: !!user, emailOnFileMasked: mask(user && user.email), emailTypedMasked: mask(email) },
+      });
     }
 
     // สร้าง OTP แล้วส่งอีเมล
