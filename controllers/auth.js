@@ -4,6 +4,37 @@ const jwt = require("jsonwebtoken");
 const SECRET = require("../config/secret");
 const { sendMail } = require("../config/mailer");
 const { createOtp, verifyOtp, isVerified, clearOtp } = require("../utils/otpStore");
+const https = require("https");
+
+// ชั่วคราว: ตรวจว่า Render ต่อ API ของผู้ให้บริการอีเมลเจ้าไหนได้บ้าง
+// ต่อได้ = ได้ status code กลับมา (เช่น 401/200) / ต่อไม่ได้ = error code (ECONNRESET ฯลฯ)
+exports.netcheck = async (req, res) => {
+  const targets = {
+    resend: "https://api.resend.com/emails",
+    mailjet: "https://api.mailjet.com/v3/REST/sender",
+    sendgrid: "https://api.sendgrid.com/v3/scopes",
+    brevo: "https://api.brevo.com/v3/account",
+    elasticemail: "https://api.elasticemail.com/v4/statistics",
+    smtp2go: "https://api.smtp2go.com/v3/stats/email_summary",
+    mailersend: "https://api.mailersend.com/v1/me",
+  };
+  const probe = (urlStr) =>
+    new Promise((resolve) => {
+      const u = new URL(urlStr);
+      const r = https.request(
+        { host: u.hostname, path: u.pathname, method: "GET", family: 4, timeout: 8000, headers: { "User-Agent": "netcheck/1.0" } },
+        (resp) => { resp.resume(); resolve(`ok(${resp.statusCode})`); }
+      );
+      r.on("error", (e) => resolve(`FAIL:${e.code || e.message}`));
+      r.on("timeout", () => { r.destroy(); resolve("FAIL:timeout"); });
+      r.end();
+    });
+
+  const entries = await Promise.all(
+    Object.entries(targets).map(async ([k, url]) => [k, await probe(url)])
+  );
+  res.json({ success: true, result: Object.fromEntries(entries) });
+};
 
 // --- Register (สมัครสมาชิก) ---
 exports.register = async (req, res) => {
