@@ -20,9 +20,60 @@ const BREVO_API_KEY = process.env.BREVO_API_KEY;
 // Resend HTTP API — ทางเลือกที่ใช้ได้ทันทีหลังสมัคร (ไม่มีด่านรอ activation แบบ Brevo)
 // ถ้าไม่ verify โดเมน จะส่งได้เฉพาะอีเมลเจ้าของบัญชี และ from ต้องเป็น onboarding@resend.dev
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-// อีเมลผู้ส่ง — Brevo: ต้องเป็น sender ที่ verify แล้ว / Resend (ยังไม่ verify โดเมน): บังคับ onboarding@resend.dev
+// Mailjet HTTP API — ฟรี ส่งหาอีเมลใครก็ได้โดย verify แค่ "อีเมลผู้ส่ง" (ไม่ต้องมีโดเมน)
+// ต้องมีทั้ง API key (public) และ Secret key
+const MAILJET_API_KEY = process.env.MAILJET_API_KEY;
+const MAILJET_SECRET_KEY = process.env.MAILJET_SECRET_KEY;
+// อีเมลผู้ส่ง — ต้องเป็น sender ที่ verify แล้ว (Mailjet/Brevo) / Resend ยังไม่ verify โดเมน = onboarding@resend.dev
 const MAIL_FROM = process.env.MAIL_FROM || MAIL_USER;
 const MAIL_FROM_NAME = "หอพัก Around Loei";
+
+// ส่งอีเมลผ่าน Mailjet HTTP API (https://api.mailjet.com/v3.1/send)
+// verify แค่อีเมลผู้ส่ง ก็ส่งหาผู้รับใครก็ได้ (ไม่ต้องมีโดเมน)
+async function sendViaMailjet({ to, subject, text, attachments }) {
+    if (!MAIL_FROM) {
+        throw new Error("ยังไม่ได้ตั้งค่า MAIL_FROM / MAIL_USER (อีเมลผู้ส่งที่ verify ใน Mailjet)");
+    }
+
+    const message = {
+        From: { Email: MAIL_FROM, Name: MAIL_FROM_NAME },
+        To: [{ Email: to }],
+        Subject: subject,
+        TextPart: text,
+    };
+    if (attachments && attachments.length) {
+        message.Attachments = attachments.map((a) => ({
+            ContentType: a.contentType || "application/octet-stream",
+            Filename: a.filename,
+            Base64Content: Buffer.isBuffer(a.content) ? a.content.toString("base64") : Buffer.from(a.content).toString("base64"),
+        }));
+    }
+
+    // auth แบบ Basic: base64(APIKEY:SECRETKEY)
+    const auth = Buffer.from(`${MAILJET_API_KEY}:${MAILJET_SECRET_KEY}`).toString("base64");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    let res;
+    try {
+        res = await fetch("https://api.mailjet.com/v3.1/send", {
+            method: "POST",
+            headers: {
+                Authorization: `Basic ${auth}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ Messages: [message] }),
+            signal: controller.signal,
+        });
+    } finally {
+        clearTimeout(timer);
+    }
+
+    if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`Mailjet API ${res.status}: ${detail.slice(0, 300)}`);
+    }
+    return res.json().catch(() => ({}));
+}
 
 // ส่งอีเมลผ่าน Resend HTTP API (https://api.resend.com/emails)
 async function sendViaResend({ to, subject, text, attachments }) {
@@ -175,7 +226,8 @@ async function sendWithRetry(mailOptions) {
 // to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ, pdfBuffer: Buffer ของ PDF, filename: ชื่อไฟล์แนบ
 async function sendInvoiceMail({ to, subject, text, pdfBuffer, filename }) {
     const attachments = [{ filename, content: pdfBuffer, contentType: "application/pdf" }];
-    // ลำดับ: Resend → Brevo → SMTP (dev) — ตัวไหนตั้ง key ไว้ใช้ตัวนั้น
+    // ลำดับ: Mailjet → Resend → Brevo → SMTP (dev) — ตัวไหนตั้ง key ไว้ใช้ตัวนั้น
+    if (MAILJET_API_KEY && MAILJET_SECRET_KEY) return void (await sendViaMailjet({ to, subject, text, attachments }));
     if (RESEND_API_KEY) return void (await sendViaResend({ to, subject, text, attachments }));
     if (BREVO_API_KEY) return void (await sendViaBrevo({ to, subject, text, attachments }));
     await sendWithRetry({ from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text, attachments });
@@ -184,6 +236,7 @@ async function sendInvoiceMail({ to, subject, text, pdfBuffer, filename }) {
 // ส่งอีเมลข้อความธรรมดา (ไม่มีไฟล์แนบ) — ใช้กับอีเมลยืนยันการจอง / OTP
 // to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ
 async function sendMail({ to, subject, text }) {
+    if (MAILJET_API_KEY && MAILJET_SECRET_KEY) return void (await sendViaMailjet({ to, subject, text }));
     if (RESEND_API_KEY) return void (await sendViaResend({ to, subject, text }));
     if (BREVO_API_KEY) return void (await sendViaBrevo({ to, subject, text }));
     await sendWithRetry({ from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text });
