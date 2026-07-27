@@ -51,28 +51,39 @@ async function sendViaMailjet({ to, subject, text, attachments }) {
 
     // auth แบบ Basic: base64(APIKEY:SECRETKEY)
     const auth = Buffer.from(`${MAILJET_API_KEY}:${MAILJET_SECRET_KEY}`).toString("base64");
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
-    let res;
-    try {
-        res = await fetch("https://api.mailjet.com/v3.1/send", {
-            method: "POST",
-            headers: {
-                Authorization: `Basic ${auth}`,
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ Messages: [message] }),
-            signal: controller.signal,
-        });
-    } finally {
-        clearTimeout(timer);
-    }
+    const payload = JSON.stringify({ Messages: [message] });
 
-    if (!res.ok) {
-        const detail = await res.text().catch(() => "");
-        throw new Error(`Mailjet API ${res.status}: ${detail.slice(0, 300)}`);
+    // retry เมื่อเจอ network error (ECONNRESET/fetch failed) — บน Render ต่อ Mailjet ถูกรีเซ็ตเป็นครั้งคราว
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 20000);
+        try {
+            const res = await fetch("https://api.mailjet.com/v3.1/send", {
+                method: "POST",
+                headers: {
+                    Authorization: `Basic ${auth}`,
+                    "Content-Type": "application/json",
+                },
+                body: payload,
+                signal: controller.signal,
+            });
+            if (!res.ok) {
+                const detail = await res.text().catch(() => "");
+                throw new Error(`Mailjet API ${res.status}: ${detail.slice(0, 300)}`);
+            }
+            return res.json().catch(() => ({}));
+        } catch (err) {
+            lastErr = err;
+            // ถ้าเป็น HTTP error (ไม่ใช่ network) ไม่ต้อง retry — โยนทันที
+            if (String(err.message || "").startsWith("Mailjet API ")) throw err;
+            console.error(`Mailjet attempt ${attempt + 1} network error:`, err?.cause?.code || err?.message);
+            await new Promise((r) => setTimeout(r, 1200));
+        } finally {
+            clearTimeout(timer);
+        }
     }
-    return res.json().catch(() => ({}));
+    throw lastErr;
 }
 
 // ส่งอีเมลผ่าน Resend HTTP API (https://api.resend.com/emails)
