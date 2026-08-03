@@ -8,7 +8,6 @@ const { readSlipQr, verifySlipImage } = require("../utils/slipQr");
 const { createPromptPayCharge, retrieveCharge } = require("../config/omise");
 const { setAuditUser } = require("../utils/audit");
 const { MONTHLY_LOCK_DEPOSIT } = require("../config/billing_rules");
-const { WATER_RATE, ELEC_RATE } = require("../config/utility_rates");
 const { buildPagination } = require("../utils/pagination");
 
 // ==========================================
@@ -711,7 +710,7 @@ exports.payBookingNow = async (req, res) => {
         if (bk.rent_type === "monthly") {
             // รายเดือน: มัดจำล็อกห้องคงที่ 2,000 บาท (ไม่ผูกกับราคาห้อง)
             total = MONTHLY_LOCK_DEPOSIT;
-            itemName = "มัดจำล็อกห้องรายเดือน";
+            itemName = "ค่ามัดจำเช่าห้องรายเดือน";
             quantity = 1;
             unitPrice = MONTHLY_LOCK_DEPOSIT;
             invoiceType = "deposit";
@@ -744,15 +743,12 @@ exports.payBookingNow = async (req, res) => {
                 [id, today, total, invoiceType]
             );
             invoiceId = invRes.rows[0].invoice_id;
-            // เรียงรายการย่อยให้อ่านง่าย: ค่าน้ำ → ค่าไฟ → ค่าห้อง
-            // ณ ตอนจอง/จ่ายล่วงหน้ายังไม่มีมิเตอร์จริง จึงใส่ค่าน้ำ/ไฟเป็น 0 หน่วยไว้ก่อน แล้วไปอัปเดตยอดจริงตอนออกบิลรายเดือน (computeInvoice)
+            // ใส่รายการเดียว: รายวัน = ค่าห้องรายวัน · รายเดือน = ค่ามัดจำเช่าห้องรายเดือน (คงที่ 2,000)
+            // ไม่ใส่ค่าน้ำ/ค่าไฟ — บิลตอนจอง/จ่ายล่วงหน้าไม่เกี่ยวกับค่าสาธารณูปโภค (คิดแยกในบิลค่าห้องรายเดือน)
             await client.query(
                 `INSERT INTO invoice_details (invoice_id, item_name, quantity, unit_price, subtotal)
-                 VALUES
-                    ($1, 'ค่าน้ำ (0 หน่วย)', 0, $2, 0),
-                    ($1, 'ค่าไฟ (0 หน่วย)', 0, $3, 0),
-                    ($1, $4, $5, $6, $7)`,
-                [invoiceId, WATER_RATE, ELEC_RATE, itemName, quantity, unitPrice, total]
+                 VALUES ($1, $2, $3, $4, $5)`,
+                [invoiceId, itemName, quantity, unitPrice, total]
             );
         }
 
@@ -816,13 +812,11 @@ async function _ensureDailyBookingInvoice(client, bookingId, userId, userRole) {
         [bookingId, today, total]
     );
     const invoiceId = invRes.rows[0].invoice_id;
+    // ใส่รายการเดียว: ค่าห้องพักรายวัน — ไม่ใส่ค่าน้ำ/ค่าไฟ (บิลตอนจองไม่เกี่ยวกับค่าสาธารณูปโภค)
     await client.query(
         `INSERT INTO invoice_details (invoice_id, item_name, quantity, unit_price, subtotal)
-         VALUES
-            ($1, 'ค่าน้ำ (0 หน่วย)', 0, $2, 0),
-            ($1, 'ค่าไฟ (0 หน่วย)', 0, $3, 0),
-            ($1, $4, $5, $6, $7)`,
-        [invoiceId, WATER_RATE, ELEC_RATE, `ค่าห้องพักรายวัน (${nights} วัน)`, nights, bk.room_price, total]
+         VALUES ($1, $2, $3, $4, $5)`,
+        [invoiceId, `ค่าห้องพักรายวัน (${nights} วัน)`, nights, bk.room_price, total]
     );
     return { invoiceId, total };
 }

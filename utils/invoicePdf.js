@@ -106,6 +106,30 @@ async function buildInvoicePdf(invoice, mode = "invoice") {
         }
     }
 
+    // 5. บล็อกข้อมูลลูกค้า (มุมซ้ายบน) — ใบเสร็จกับใบแจ้งหนี้แสดงต่างกัน
+    // ใบเสร็จ: ชื่อลูกค้า + ช่วงวันเข้าพัก (ถ้ามี) แบบมาตรฐานใบจอง/ใบเสร็จโรงแรม ไม่ระบุเลขห้อง
+    // ใบแจ้งหนี้: ชื่อลูกค้า + เลขห้อง (บอกว่าเป็นบิลของห้องไหน) + บรรทัดที่อยู่
+    const customerStack = [];
+    if (isReceipt) {
+        customerStack.push({ text: `นามลูกค้า: ${invoice.guest_name || "-"}` });
+        if (invoice.invoice_type === "deposit") {
+            // ใบเสร็จมัดจำเช่าห้องรายเดือน: บอกว่าจองห้องไหน + วันที่จะเข้าพัก (วันเดียว)
+            customerStack.push({ text: `ห้องที่จอง: ${invoice.room_number || "-"}`, margin: [0, 2, 0, 0] });
+            if (invoice.check_in_date) {
+                customerStack.push({ text: `วันเข้าพัก: ${thaiDate(invoice.check_in_date)}`, margin: [0, 2, 0, 0] });
+            }
+        } else if (invoice.rent_type === "daily" && invoice.check_in_date && invoice.check_out_date) {
+            // ใบเสร็จรายวัน: โชว์ช่วงวันเข้าพัก-ออก (ไม่ระบุเลขห้อง)
+            customerStack.push({
+                text: `วันเข้าพัก: ${thaiDate(invoice.check_in_date)} - ${thaiDate(invoice.check_out_date)}`,
+                margin: [0, 2, 0, 0],
+            });
+        }
+    } else {
+        customerStack.push({ text: `นามลูกค้า: ${invoice.guest_name || "-"}  ห้อง ${invoice.room_number || "-"}` });
+        customerStack.push({ text: "ที่อยู่" });
+    }
+
     const docDefinition = {
         defaultStyle: { font: "Sarabun", fontSize: 11 },
         pageSize: "A4",
@@ -139,10 +163,7 @@ async function buildInvoicePdf(invoice, mode = "invoice") {
             {
                 columns: [
                     {
-                        stack: [
-                            { text: `นามลูกค้า  ห้อง ${invoice.room_number || "-"}` },
-                            { text: "ที่อยู่" },
-                        ],
+                        stack: customerStack,
                     },
                     {
                         stack: [
@@ -157,10 +178,10 @@ async function buildInvoicePdf(invoice, mode = "invoice") {
                 margin: [0, 0, 0, 8],
             },
 
-            // ผู้เช่า + ป้ายสถานะ
+            // ป้ายสถานะ (ชื่อลูกค้าย้ายไปโชว์ตรง "นามลูกค้า" ด้านบนแล้ว)
             {
                 columns: [
-                    { text: `ผู้เช่า: ${invoice.guest_name || "-"}` },
+                    { text: "", width: "*" }, // ช่องว่างดันป้ายสถานะไปชิดขวา
                     {
                         text: statusText,
                         color: "white",
@@ -220,9 +241,11 @@ async function buildInvoicePdf(invoice, mode = "invoice") {
                 }
                 : {
                     stack: [
-                        { text: "ได้รับเงินจำนวนข้างต้นไว้เรียบร้อยแล้ว", margin: [0, 10, 0, 0] },
+                        // โชว์วิธีชำระเงินถ้ามีข้อมูลส่งมา (โอนเงิน/เงินสด/QR) ตามมาตรฐานใบเสร็จทั่วไป
+                        invoice.payment_method ? { text: `วิธีชำระเงิน: ${invoice.payment_method}`, margin: [0, 10, 0, 0] } : null,
+                        { text: "ได้รับเงินจำนวนข้างต้นไว้เรียบร้อยแล้ว", margin: [0, invoice.payment_method ? 4 : 10, 0, 0] },
                         { text: `ผู้รับเงิน: ${DORM_NAME}`, margin: [0, 4, 0, 0] },
-                    ],
+                    ].filter(Boolean),
                 },
         ],
         styles: {

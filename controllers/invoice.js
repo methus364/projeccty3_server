@@ -114,8 +114,9 @@ async function loadFullInvoice(db, invoiceId) {
     const headRes = await db.query(
         `SELECT
             i.invoice_id, i.booking_id, i.invoice_date, i.due_date,
-            i.room_cost, i.water_cost, i.elec_cost, i.total_amount, i.invoice_status,
+            i.room_cost, i.water_cost, i.elec_cost, i.total_amount, i.invoice_status, i.invoice_type,
             b.member_id, b.rent_type,
+            b.check_in_date, b.check_out_date,
             m.full_name AS guest_name,
             m.email     AS guest_email,
             r.room_number
