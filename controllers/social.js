@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const SECRET = require("../config/secret");
 
@@ -32,6 +33,32 @@ async function verifyGoogle(idToken) {
     if (data.aud !== clientId) throw new Error("token นี้ไม่ได้ออกให้แอปนี้ (audience ไม่ตรง)");
 
     return { provider_id: data.sub, email: data.email, full_name: data.name };
+}
+
+// Google (redirect flow): แลก authorization code → id_token ที่ token endpoint
+//   แล้วส่งต่อให้ verifyGoogle ตรวจ audience/sub อีกชั้น (ต้องมี GOOGLE_CLIENT_SECRET)
+async function verifyGoogleCode(code, redirectUri) {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+        throw new Error("ยังไม่ได้ตั้งค่า GOOGLE_CLIENT_ID/SECRET ใน server/.env");
+    }
+
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+            grant_type: "authorization_code",
+            code,
+            redirect_uri: redirectUri,
+            client_id: clientId,
+            client_secret: clientSecret,
+        }),
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.id_token) throw new Error(tokenData.error_description || "แลก token กับ Google ไม่สำเร็จ");
+
+    return verifyGoogle(tokenData.id_token);
 }
 
 // Facebook: ตรวจ access_token ว่าเป็นของแอปเรา (debug_token) แล้วดึงโปรไฟล์ (/me)
@@ -204,6 +231,72 @@ exports.lineExchange = async (req, res) => {
     } catch (error) {
         console.error("lineExchange Error:", error.message);
         res.status(400).json({ success: false, message: error.message });
+    }
+};
+
+// ==========================================
+// POST /auth/google/exchange — Google (redirect flow)
+//   body: { code, redirect_uri }
+// ==========================================
+exports.googleExchange = async (req, res) => {
+    const { code, redirect_uri } = req.body;
+    if (!code || !redirect_uri) {
+        return res.status(400).json({ success: false, message: "กรุณาส่ง code และ redirect_uri" });
+    }
+    try {
+        const profile = await verifyGoogleCode(code, redirect_uri);
+        await loginWithProfile(res, "google", profile);
+    } catch (error) {
+        console.error("googleExchange Error:", error.message);
+        res.status(400).json({ success: false, message: error.message });
+    }
+};
+
+// ==========================================
+// POST /auth/social/complete — เติมโปรไฟล์ผู้ใช้ใหม่ที่มาจาก social (LINE ฯลฯ)
+//   ใช้ token ที่ออกจาก /auth/line/exchange (ผ่าน authCheck) เพื่ออัปเดต member ของตัวเอง
+//   body: { full_name?, phone_number?, password?, user_role }
+//   - ตั้งรหัสผ่านให้บัญชี social ที่ password เป็น NULL
+//   - เลือกประเภทผู้เช่าเองได้ (whitelist Daily/Monthly กัน escalate)
+//   - ออก token ใหม่ให้ role ที่อัปเดตมีผลทันที
+// ==========================================
+exports.completeSocialProfile = async (req, res) => {
+    const memberId = req.user.id;
+    const { full_name, phone_number, password, user_role } = req.body;
+    try {
+        const cur = await pool.query("SELECT * FROM members WHERE member_id = $1 LIMIT 1", [memberId]);
+        if (!cur.rows[0]) return res.status(404).json({ success: false, message: "ไม่พบสมาชิก" });
+        const c = cur.rows[0];
+
+        // whitelist เฉพาะ role ผู้เช่า — ห้ามรับ Admin/ค่าอื่นจาก client (กัน privilege escalation)
+        const finalRole = user_role === "Monthly_Tenant" ? "Monthly_Tenant" : "Daily_Tenant";
+
+        // hash รหัสผ่านถ้าส่งมา (ตั้งรหัสให้บัญชี social ที่ยังไม่มีรหัสผ่าน)
+        let hashPassword = c.password;
+        if (password) {
+            if (String(password).length < 6) {
+                return res.status(400).json({ success: false, message: "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร" });
+            }
+            hashPassword = await bcrypt.hash(password, 10);
+        }
+
+        const updated = await pool.query(
+            `UPDATE members SET full_name = $1, phone_number = $2, password = $3, user_role = $4
+             WHERE member_id = $5 RETURNING *`,
+            [
+                full_name ? full_name : c.full_name,
+                phone_number !== undefined ? phone_number : c.phone_number,
+                hashPassword,
+                finalRole,
+                memberId,
+            ]
+        );
+
+        const { payload, token } = signToken(updated.rows[0]);
+        res.json({ success: true, payload, token, message: "บันทึกข้อมูลสมาชิกเรียบร้อย" });
+    } catch (error) {
+        console.error("completeSocialProfile Error:", error.message);
+        res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
     }
 };
 
