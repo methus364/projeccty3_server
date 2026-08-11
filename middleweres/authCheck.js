@@ -38,6 +38,44 @@ exports.authCheck = async (req, res, next) => {
   }
 };
 
+// --- 1.1 ตรวจ token สำหรับ /auth/social/complete ---
+// รับได้ 2 แบบ:
+//   - pending token (ผู้ใช้ Google ใหม่ที่ยังไม่ถูกสร้างใน DB) → เก็บโปรไฟล์ที่ตรวจแล้วไว้ที่ req.pendingSocial
+//   - token ปกติ (member มีอยู่จริง เช่น LINE / บัญชีเดิม) → ทำงานเหมือน authCheck
+exports.socialCompleteCheck = async (req, res, next) => {
+  try {
+    const headerToken = req.headers.authorization;
+    if (!headerToken) {
+      return res.status(401).json({ message: "No Token, Authorization" });
+    }
+    const token = headerToken.split(" ")[1];
+    const decode = jwt.verify(token, SECRET);
+
+    // pending social (ยังไม่มี member ใน DB) — ปล่อยผ่านไปให้ controller สร้าง member
+    if (decode.type === "social_pending") {
+      req.pendingSocial = decode; // { provider, provider_id, email, full_name }
+      return next();
+    }
+
+    // token ปกติ — ตรวจว่ามี member จริงเหมือน authCheck
+    req.user = decode;
+    const result = await pool.query(
+      'SELECT member_id, user_role FROM Members WHERE username = $1 LIMIT 1',
+      [req.user.username]
+    );
+    const user = result.rows[0];
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    req.user.member_id = user.member_id;
+    req.user.user_role = user.user_role;
+    next();
+  } catch (err) {
+    console.error(err);
+    res.status(401).json({ message: "Token Invalid" });
+  }
+};
+
 // หมายเหตุ: middleware เช็คสิทธิ์ทั้ง 3 ตัวด้านล่างถูกวางต่อจาก authCheck เสมอ (ดู /routes)
 // ดังนั้น req.user.user_role ถูกเติมค่าจาก DB มาแล้วใน authCheck — อ่านจาก req.user ได้เลย
 // ไม่ต้อง query ตาราง Members ซ้ำ ช่วยลด round-trip DB จาก 2 ครั้ง เหลือ 1 ครั้งต่อ request

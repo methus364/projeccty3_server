@@ -120,7 +120,7 @@ async function verifyLine(code, redirectUri) {
 // Core: หา/ผูก/สร้าง member จากโปรไฟล์ที่ "ตรวจแล้ว" (ใช้ร่วมทุก provider)
 //   db = client ที่อยู่ใน transaction · คืน { member, isNewUser, linked }
 // ==========================================
-async function findOrCreateMember(db, provider, { provider_id, email, full_name }) {
+async function findOrCreateMember(db, provider, { provider_id, email, full_name }, { deferCreate = false } = {}) {
     // ล็อกด้วย advisory lock คีย์ตาม provider+provider_id (auto ปลดล็อกตอน COMMIT/ROLLBACK ของ transaction)
     // กันสอง request login พร้อมกันด้วยบัญชี social เดียวกันแล้วผ่านเช็ค "ยังไม่มีบัญชีนี้" ทั้งคู่ → สร้าง member ซ้ำ
     await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`${provider}:${provider_id}`]);
@@ -149,7 +149,13 @@ async function findOrCreateMember(db, provider, { provider_id, email, full_name 
         }
     }
 
-    // 3. ไม่เจอเลย → สมัครใหม่ (password NULL, role Daily_Tenant ห้าม escalate)
+    // 3. ไม่เจอเลย → ผู้ใช้ใหม่
+    //    - deferCreate (เช่น Google redirect flow): ยังไม่บันทึกลง DB — ให้ชั้นบนออก pending token
+    //      ไปยืนยัน/เลือกประเภทผู้เช่าที่หน้า register ก่อน ค่อยสร้าง member จริงตอน /auth/social/complete
+    //    - ปกติ: สมัครใหม่ทันที (password NULL, role Daily_Tenant ห้าม escalate)
+    if (!member && deferCreate) {
+        return { member: null, isNewUser: true, linked: false, pending: true };
+    }
     if (!member) {
         const username = `${provider}_${provider_id}`;
         const displayName = full_name || email || `ผู้ใช้ ${provider}`;
@@ -171,12 +177,39 @@ async function findOrCreateMember(db, provider, { provider_id, email, full_name 
 }
 
 // บันทึก member + ออก JWT ใน transaction (ใช้ร่วมทุก endpoint)
-async function loginWithProfile(res, provider, profile) {
+async function loginWithProfile(res, provider, profile, { deferCreate = false } = {}) {
     const client = await pool.connect();
     try {
         await client.query("BEGIN");
-        const result = await findOrCreateMember(client, provider, profile);
+        const result = await findOrCreateMember(client, provider, profile, { deferCreate });
         await client.query("COMMIT");
+
+        // ผู้ใช้ใหม่แบบ deferred (Google): ยังไม่ถูกบันทึกลง DB — ออก token ชั่วคราว (pending)
+        // ที่พก provider/provider_id/email/ชื่อ ที่ "ตรวจแล้ว" ไปด้วย เพื่อให้ /auth/social/complete
+        // สร้าง member จริงตอนผู้ใช้กดยืนยัน (เลือกประเภทผู้เช่า/ตั้งรหัสผ่านเอง)
+        if (result.pending) {
+            const pendingToken = jwt.sign(
+                {
+                    type: "social_pending",
+                    provider,
+                    provider_id: profile.provider_id,
+                    email: profile.email || null,
+                    full_name: profile.full_name || null,
+                },
+                SECRET,
+                { expiresIn: "15m" }
+            );
+            return res.json({
+                success: true,
+                pending: true,
+                isNewUser: true,
+                token: pendingToken,
+                payload: { username: `${provider}_${profile.provider_id}` },
+                profile: { full_name: profile.full_name || "", email: profile.email || "" },
+                message: "กรุณายืนยันข้อมูลเพื่อสมัครสมาชิกให้เสร็จสมบูรณ์",
+            });
+        }
+
         const { payload, token } = signToken(result.member);
         res.json({
             success: true, payload, token,
@@ -245,7 +278,9 @@ exports.googleExchange = async (req, res) => {
     }
     try {
         const profile = await verifyGoogleCode(code, redirect_uri);
-        await loginWithProfile(res, "google", profile);
+        // deferCreate: ผู้ใช้ Google ใหม่จะยังไม่ถูกบันทึกจนกว่าจะกดยืนยันที่หน้า register
+        // (บัญชีเดิม/อีเมลตรง ยังเข้าสู่ระบบ/ผูกบัญชีได้ตามปกติ)
+        await loginWithProfile(res, "google", profile, { deferCreate: true });
     } catch (error) {
         console.error("googleExchange Error:", error.message);
         res.status(400).json({ success: false, message: error.message });
@@ -261,6 +296,11 @@ exports.googleExchange = async (req, res) => {
 //   - ออก token ใหม่ให้ role ที่อัปเดตมีผลทันที
 // ==========================================
 exports.completeSocialProfile = async (req, res) => {
+    // กรณีผู้ใช้ social ใหม่แบบ deferred (Google): เพิ่งกดยืนยันครั้งแรก ยังไม่มี member ใน DB
+    // → สร้าง member จริงตอนนี้ พร้อม role/รหัสผ่าน/เบอร์ ที่ผู้ใช้เลือกเอง
+    if (req.pendingSocial) {
+        return createMemberFromPending(req, res);
+    }
     const memberId = req.user.id;
     const { full_name, phone_number, password, user_role } = req.body;
     try {
@@ -299,6 +339,63 @@ exports.completeSocialProfile = async (req, res) => {
         res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
     }
 };
+
+// สร้าง member จริงจาก pending social (Google ใหม่) ตอนกดยืนยัน — ก่อนหน้านี้ยังไม่บันทึกลง DB เลย
+async function createMemberFromPending(req, res) {
+    const { provider, provider_id, email, full_name: pendingName } = req.pendingSocial;
+    const { full_name, phone_number, password, user_role } = req.body;
+
+    // บัญชีใหม่ต้องตั้งรหัสผ่าน (ให้ล็อกอินด้วย username/password ทีหลังได้)
+    if (!password || String(password).length < 6) {
+        return res.status(400).json({ success: false, message: "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร" });
+    }
+
+    // whitelist เฉพาะ role ผู้เช่า — ห้ามรับ Admin/ค่าอื่นจาก client (กัน privilege escalation)
+    const finalRole = user_role === "Monthly_Tenant" ? "Monthly_Tenant" : "Daily_Tenant";
+    const displayName = full_name || pendingName || email || `ผู้ใช้ ${provider}`;
+
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+        // ล็อกตาม provider+provider_id กันกดยืนยันซ้ำ/สอง request พร้อมกันแล้วสร้าง member ซ้ำ
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`${provider}:${provider_id}`]);
+
+        // เผื่อบัญชี social นี้ถูกสร้างไปแล้ว (กดยืนยันซ้ำ) → ใช้ตัวเดิม ไม่สร้างใหม่
+        const existing = await client.query(
+            `SELECT m.* FROM social_accounts s JOIN members m ON s.member_id = m.member_id
+             WHERE s.provider = $1 AND s.provider_id = $2`,
+            [provider, provider_id]
+        );
+
+        let member;
+        if (existing.rows.length > 0) {
+            member = existing.rows[0];
+        } else {
+            const hashPassword = await bcrypt.hash(password, 10);
+            const username = `${provider}_${provider_id}`;
+            const insRes = await client.query(
+                `INSERT INTO members (username, full_name, email, phone_number, password, user_role)
+                 VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+                [username, displayName, email || null, phone_number || null, hashPassword, finalRole]
+            );
+            member = insRes.rows[0];
+            await client.query(
+                `INSERT INTO social_accounts (member_id, provider, provider_id) VALUES ($1, $2, $3)`,
+                [member.member_id, provider, provider_id]
+            );
+        }
+
+        await client.query("COMMIT");
+        const { payload, token } = signToken(member);
+        return res.json({ success: true, payload, token, message: "สมัครสมาชิกเรียบร้อย" });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("createMemberFromPending Error:", error.message);
+        return res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการสมัครสมาชิก" });
+    } finally {
+        client.release();
+    }
+}
 
 // ==========================================
 // GET /my-social-accounts — ดูบัญชี social ที่ผูกไว้ (ผู้ล็อกอิน)
