@@ -222,6 +222,19 @@ test('login: ถูกต้อง + ยืนยันแล้ว → คื�
   assert.equal(res.body.payload.role, 'Daily_Tenant');
 });
 
+test('login: ด้วยชื่อผู้ใช้ (field login) → 200 + query ด้วย email OR username', async () => {
+  const hashed = await bcrypt.hash('correctpass', 10);
+  setHandler(() => ({ rows: [{ member_id: 1, username: 'user1', email: 'a@b.com', password: hashed, user_role: 'Daily_Tenant', email_verified_at: new Date() }] }));
+  const res = makeRes();
+  await auth.login({ body: { login: 'user1', password: 'correctpass' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.ok(res.body.token);
+  // ต้อง query แบบรับได้ทั้งอีเมลและชื่อผู้ใช้
+  const q = calls.find((c) => has(c.sql, 'FROM Members WHERE email = $1 OR username = $1'));
+  assert.ok(q, 'ต้อง query ด้วย email OR username');
+  assert.equal(q.params[0], 'user1');
+});
+
 // ============================================================
 // currentUser
 // ============================================================

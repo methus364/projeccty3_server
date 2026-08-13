@@ -175,21 +175,25 @@ exports.resendRegistrationOtp = async (req, res) => {
   }
 };
 
-// --- Login (เข้าสู่ระบบด้วยอีเมล) ---
+// --- Login (เข้าสู่ระบบด้วยอีเมล หรือ ชื่อผู้ใช้) ---
 exports.login = async (req, res) => {
   try {
-    const email = (req.body.email || "").trim();
+    // รับได้ทั้งอีเมลและชื่อผู้ใช้ (รองรับ key เดิม `email` เพื่อความเข้ากันได้)
+    const loginId = (req.body.login || req.body.email || "").trim();
     const password = req.body.password || "";
 
-    if (!email || !password) {
-      return res.status(400).json({ success: false, message: "กรุณากรอกอีเมลและรหัสผ่าน" });
+    if (!loginId || !password) {
+      return res.status(400).json({ success: false, message: "กรุณากรอกอีเมล/ชื่อผู้ใช้ และรหัสผ่าน" });
     }
 
-    // 1. หาสมาชิกจากอีเมล
-    const result = await pool.query('SELECT * FROM Members WHERE email = $1 LIMIT 1', [email]);
+    // 1. หาสมาชิกจากอีเมล หรือ ชื่อผู้ใช้ (อันไหนตรงก็ได้)
+    const result = await pool.query(
+      'SELECT * FROM Members WHERE email = $1 OR username = $1 LIMIT 1',
+      [loginId]
+    );
     const user = result.rows[0];
     if (!user) {
-      return res.status(400).json({ success: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
+      return res.status(400).json({ success: false, message: "อีเมล/ชื่อผู้ใช้ หรือรหัสผ่านไม่ถูกต้อง" });
     }
 
     // 2. บัญชี social-only (password เป็น NULL) — กัน error แล้วบอกให้ไปใช้ social login
@@ -200,7 +204,7 @@ exports.login = async (req, res) => {
     // 3. ตรวจรหัสผ่าน
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(401).json({ success: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
+      return res.status(401).json({ success: false, message: "อีเมล/ชื่อผู้ใช้ หรือรหัสผ่านไม่ถูกต้อง" });
     }
 
     // 4. ต้องยืนยันอีเมลก่อนถึงจะเข้าใช้งานได้
