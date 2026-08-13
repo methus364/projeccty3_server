@@ -178,8 +178,8 @@ exports.resendRegistrationOtp = async (req, res) => {
 // --- Login (เข้าสู่ระบบด้วยอีเมล หรือ ชื่อผู้ใช้) ---
 exports.login = async (req, res) => {
   try {
-    // รับได้ทั้งอีเมลและชื่อผู้ใช้ (รองรับ key เดิม `email` เพื่อความเข้ากันได้)
-    const loginId = (req.body.login || req.body.email || "").trim();
+    // รับได้ทั้งอีเมลและชื่อผู้ใช้ (รองรับ key เดิม `email`/`username` เพื่อความเข้ากันได้ — mobile ส่ง username)
+    const loginId = (req.body.login || req.body.email || req.body.username || "").trim();
     const password = req.body.password || "";
 
     if (!loginId || !password) {
