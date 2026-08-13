@@ -24,13 +24,18 @@ function signToken(member) {
 
 // Google: ตรวจ id_token ที่ tokeninfo endpoint + เช็ค audience ตรง client id ของเรา
 async function verifyGoogle(idToken) {
-    const clientId = process.env.GOOGLE_CLIENT_ID;
-    if (!clientId) throw new Error("ยังไม่ได้ตั้งค่า GOOGLE_CLIENT_ID ใน server/.env");
+    // รับ client id ได้หลายตัว (web + android + ios) — mobile จะได้ id_token ที่ aud เป็น client id ของแพลตฟอร์มนั้น
+    // ตั้ง GOOGLE_CLIENT_IDS แบบคั่นด้วย comma ถ้ามีหลายตัว · ถ้าไม่ตั้ง ใช้ GOOGLE_CLIENT_ID (web) ตัวเดียว
+    const allowedAudiences = (process.env.GOOGLE_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    if (allowedAudiences.length === 0) throw new Error("ยังไม่ได้ตั้งค่า GOOGLE_CLIENT_ID ใน server/.env");
 
     const r = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
     const data = await r.json();
     if (!data.sub) throw new Error("id_token ของ Google ไม่ถูกต้อง");
-    if (data.aud !== clientId) throw new Error("token นี้ไม่ได้ออกให้แอปนี้ (audience ไม่ตรง)");
+    if (!allowedAudiences.includes(data.aud)) throw new Error("token นี้ไม่ได้ออกให้แอปนี้ (audience ไม่ตรง)");
 
     return { provider_id: data.sub, email: data.email, full_name: data.name };
 }
