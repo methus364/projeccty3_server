@@ -5,101 +5,218 @@ const SECRET = require("../config/secret");
 const { sendMail } = require("../config/mailer");
 const { createOtp, verifyOtp, isVerified, clearOtp } = require("../utils/otpStore");
 
+// role ที่ผู้ใช้เลือกเองได้ตอนสมัคร — เฉพาะผู้เช่าเท่านั้น (ห้าม Admin เด็ดขาด กัน privilege escalation)
+const SIGNUP_ROLES = ["Daily_Tenant", "Monthly_Tenant"];
+
+// ตรวจรูปแบบอีเมลแบบง่ายๆ (มี @ และมีจุดหลัง @) — พอสำหรับกันพิมพ์ผิดเบื้องต้น
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+// สร้าง JWT ให้สมาชิก แล้วส่ง response แบบเดียวกับ social login ({ success, payload, token })
+function signInResponse(res, user, message) {
+  const payload = {
+    id: user.member_id,
+    username: user.username,
+    role: user.user_role,
+  };
+  const token = jwt.sign(payload, SECRET, { expiresIn: "1d" });
+  res.json({ success: true, payload, token, message });
+}
+
 // --- Register (สมัครสมาชิก) ---
+// flow ใหม่: สร้างบัญชีสถานะ "ยังไม่ยืนยันอีเมล" แล้วส่ง OTP ไปอีเมล
+//   ผู้ใช้ต้องยืนยัน OTP ที่ /auth/verify-registration ก่อนถึงจะ login ได้
 exports.register = async (req, res) => {
   try {
-    const { username, password, full_name, email, phone_number, user_role } = req.body;
+    const username = (req.body.username || "").trim();
+    const email = (req.body.email || "").trim();
+    const password = req.body.password || "";
+    const full_name = (req.body.full_name || "").trim();
+    const phone_number = req.body.phone_number || null;
+    const user_role = req.body.user_role;
 
-    if (!username) return res.status(400).json({ message: "Username is required!" });
-    if (!password) return res.status(400).json({ message: "Password is required!" });
-    if (!full_name) return res.status(400).json({ message: "Full Name is required!" });
+    // 1. ตรวจ field ที่จำเป็นให้ครบก่อน
+    if (!username) return res.status(400).json({ success: false, message: "กรุณากรอกชื่อผู้ใช้" });
+    if (!password) return res.status(400).json({ success: false, message: "กรุณากรอกรหัสผ่าน" });
+    if (password.length < 6) return res.status(400).json({ success: false, message: "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร" });
+    if (!full_name) return res.status(400).json({ success: false, message: "กรุณากรอกชื่อ-นามสกุล" });
+    if (!email) return res.status(400).json({ success: false, message: "กรุณากรอกอีเมล" });
+    if (!isValidEmail(email)) return res.status(400).json({ success: false, message: "รูปแบบอีเมลไม่ถูกต้อง" });
 
-    // 1. ตรวจสอบ username ซ้ำ
+    // 2. ต้องเลือกประเภทผู้เช่า (รายวัน/รายเดือน) ตอนสมัคร
+    if (!SIGNUP_ROLES.includes(user_role)) {
+      return res.status(400).json({ success: false, message: "กรุณาเลือกประเภทสมาชิก (ผู้เช่ารายวัน หรือ รายเดือน)" });
+    }
+
+    // 3. ตรวจ username ซ้ำ
     const checkUser = await pool.query(
       'SELECT username FROM Members WHERE username = $1 LIMIT 1',
       [username]
     );
     if (checkUser.rows.length > 0) {
-      return res.status(400).json({ message: "Username already exists" });
+      return res.status(400).json({ success: false, message: "ชื่อผู้ใช้นี้ถูกใช้แล้ว" });
     }
 
-    // 1.1 ตรวจสอบ email ซ้ำ (เฉพาะกรณีที่ผู้ใช้กรอกมา เพราะ email nullable ได้)
-    if (email) {
-      const checkEmail = await pool.query(
-        'SELECT email FROM Members WHERE email = $1 LIMIT 1',
-        [email]
-      );
-      if (checkEmail.rows.length > 0) {
-        return res.status(400).json({ message: "Email already exists" });
-      }
+    // 4. ตรวจ email ซ้ำ
+    const checkEmail = await pool.query(
+      'SELECT email FROM Members WHERE email = $1 LIMIT 1',
+      [email]
+    );
+    if (checkEmail.rows.length > 0) {
+      return res.status(400).json({ success: false, message: "อีเมลนี้ถูกใช้แล้ว" });
     }
 
-    // 2. Hash Password
+    // 5. Hash รหัสผ่าน แล้ว INSERT สมาชิกใหม่ (email_verified_at = NULL คือยังไม่ยืนยัน)
     const hashPassword = await bcrypt.hash(password, 10);
-
-    // 3. รับ role ที่เลือกตอนสมัครได้ แต่ whitelist เฉพาะ Daily_Tenant/Monthly_Tenant เท่านั้น
-    // ห้ามรับ "Admin" หรือค่าอื่นจาก client เด็ดขาด (กัน privilege escalation)
-    const finalRole = user_role === 'Monthly_Tenant' ? 'Monthly_Tenant' : 'Daily_Tenant';
-
-    // 4. INSERT รวม email
     await pool.query(
       'INSERT INTO Members (username, password, full_name, email, phone_number, user_role) VALUES ($1, $2, $3, $4, $5, $6)',
-      [username, hashPassword, full_name, email || null, phone_number || null, finalRole]
+      [username, hashPassword, full_name, email, phone_number, user_role]
     );
 
-    res.status(201).json({ success: true, message: "Register Success" });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Server error" });
-  }
-};
+    // 6. สร้าง OTP แล้วส่งไปอีเมลให้ยืนยัน
+    await sendRegistrationOtp(username, email);
 
-// --- Login (เข้าสู่ระบบ) ---
-exports.login = async (req, res) => {
-  try {
-    const { username, password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).json({ message: "Username and Password are required!" });
-    }
-
-    // 1. ตรวจสอบ Username ในตาราง Members
-    const result = await pool.query('SELECT * FROM Members WHERE username = $1 LIMIT 1', [username]);
-    const user = result.rows[0];
-
-    // ถ้าไม่พบผู้ใช้งาน
-    if (!user) {
-      return res.status(400).json({ message: "Invalid Username or Password" });
-    }
-
-    // 2. ตรวจสอบรหัสผ่านด้วย bcrypt
-    // กัน error 500 กรณีบัญชี social-only ที่ password เป็น NULL
-    if (!user.password) {
-      return res.status(401).json({ message: "บัญชีนี้ผูกกับ Social Login — กรุณาเข้าสู่ระบบผ่าน Line/Google" });
-    }
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(401).json({ message: "Invalid Username or Password" });
-    }
-
-    // 3. สร้าง Payload โดยอ้างอิงฟิลด์ตามตารางใหม่
-    const payload = {
-      id: user.member_id,
-      username: user.username,
-      role: user.user_role,
-    };
-
-    // 4. สร้าง Token
-    jwt.sign(payload, SECRET, { expiresIn: "1d" }, (err, token) => {
-      if (err) {
-        console.error(err);
-        return res.status(500).json({ message: "Server Error jwt" });
-      }
-      res.json({ payload, token });
+    res.status(201).json({
+      success: true,
+      message: "สมัครสมาชิกสำเร็จ กรุณายืนยันรหัส OTP ที่ส่งไปยังอีเมลของคุณ",
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Server error" });
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์" });
+  }
+};
+
+// ตัวช่วย: สร้าง OTP สำหรับยืนยันการสมัคร แล้วส่งอีเมล
+async function sendRegistrationOtp(username, email) {
+  const code = createOtp(username, email);
+  await sendMail({
+    to: email,
+    subject: "รหัส OTP ยืนยันการสมัครสมาชิก — หอพัก Around Loei",
+    text:
+      `สวัสดีคุณ ${username}\n\n` +
+      `รหัส OTP สำหรับยืนยันการสมัครสมาชิกของคุณคือ: ${code}\n\n` +
+      `รหัสนี้จะหมดอายุใน 5 นาที กรุณาอย่าเปิดเผยรหัสนี้แก่ผู้อื่น\n` +
+      `หากคุณไม่ได้เป็นผู้สมัคร กรุณาเพิกเฉยต่ออีเมลฉบับนี้`,
+  });
+}
+
+// --- ยืนยัน OTP การสมัคร → เปิดใช้งานบัญชี + login ให้เลย ---
+// รับ { email, otp }
+exports.verifyRegistration = async (req, res) => {
+  try {
+    const email = (req.body.email || "").trim();
+    const otp = (req.body.otp || "").trim();
+
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, message: "กรุณากรอกอีเมลและรหัส OTP" });
+    }
+
+    // 1. หาสมาชิกจากอีเมล (ต้องมีอยู่จริง เพราะสร้างตอนสมัครแล้ว)
+    const { rows } = await pool.query(
+      'SELECT * FROM Members WHERE email = $1 LIMIT 1',
+      [email]
+    );
+    const user = rows[0];
+    if (!user) {
+      return res.status(404).json({ success: false, message: "ไม่พบบัญชีที่ใช้อีเมลนี้" });
+    }
+    if (user.email_verified_at) {
+      return res.status(400).json({ success: false, message: "อีเมลนี้ยืนยันแล้ว กรุณาเข้าสู่ระบบ" });
+    }
+
+    // 2. ตรวจ OTP (key ใน otpStore = username|email — ใช้ username จาก DB ให้ตรงกับตอนส่ง)
+    const result = verifyOtp(user.username, email, otp);
+    if (!result.ok) {
+      const messages = {
+        expired: "รหัส OTP หมดอายุแล้ว กรุณาขอรหัสใหม่",
+        too_many_attempts: "กรอกรหัสผิดหลายครั้งเกินไป กรุณาขอรหัสใหม่",
+        invalid: "รหัส OTP ไม่ถูกต้อง",
+      };
+      return res.status(400).json({ success: false, message: messages[result.reason] || "รหัส OTP ไม่ถูกต้อง" });
+    }
+
+    // 3. ยืนยันสำเร็จ — มาร์คบัญชีว่ายืนยันแล้ว + ล้าง OTP ทิ้ง
+    await pool.query('UPDATE Members SET email_verified_at = NOW() WHERE member_id = $1', [user.member_id]);
+    clearOtp(user.username, email);
+
+    // 4. login ให้เลย (ออก token) เพื่อ UX ที่ลื่นไหล
+    signInResponse(res, user, "ยืนยันอีเมลสำเร็จ ยินดีต้อนรับ");
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์" });
+  }
+};
+
+// --- ขอส่งรหัส OTP ยืนยันการสมัครใหม่ (กรณีไม่ได้รับ/หมดอายุ) ---
+// รับ { email }
+exports.resendRegistrationOtp = async (req, res) => {
+  try {
+    const email = (req.body.email || "").trim();
+    if (!email) {
+      return res.status(400).json({ success: false, message: "กรุณากรอกอีเมล" });
+    }
+
+    // ส่งซ้ำเฉพาะบัญชีที่มีอยู่จริงและยังไม่ยืนยันเท่านั้น
+    const { rows } = await pool.query(
+      'SELECT username, email_verified_at FROM Members WHERE email = $1 LIMIT 1',
+      [email]
+    );
+    const user = rows[0];
+    if (user && !user.email_verified_at) {
+      await sendRegistrationOtp(user.username, email);
+    }
+
+    // ตอบข้อความกลางๆ เสมอ ไม่ยืนยันว่ามีบัญชีนี้อยู่จริงไหม (กันการเดาข้อมูลผู้ใช้)
+    res.json({ success: true, message: "ถ้าอีเมลนี้รอการยืนยันอยู่ ระบบได้ส่งรหัส OTP ใหม่ให้แล้ว" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์" });
+  }
+};
+
+// --- Login (เข้าสู่ระบบด้วยอีเมล) ---
+exports.login = async (req, res) => {
+  try {
+    const email = (req.body.email || "").trim();
+    const password = req.body.password || "";
+
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: "กรุณากรอกอีเมลและรหัสผ่าน" });
+    }
+
+    // 1. หาสมาชิกจากอีเมล
+    const result = await pool.query('SELECT * FROM Members WHERE email = $1 LIMIT 1', [email]);
+    const user = result.rows[0];
+    if (!user) {
+      return res.status(400).json({ success: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
+    }
+
+    // 2. บัญชี social-only (password เป็น NULL) — กัน error แล้วบอกให้ไปใช้ social login
+    if (!user.password) {
+      return res.status(401).json({ success: false, message: "บัญชีนี้ผูกกับ Social Login — กรุณาเข้าสู่ระบบผ่าน Line/Google" });
+    }
+
+    // 3. ตรวจรหัสผ่าน
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ success: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
+    }
+
+    // 4. ต้องยืนยันอีเมลก่อนถึงจะเข้าใช้งานได้
+    if (!user.email_verified_at) {
+      return res.status(403).json({
+        success: false,
+        message: "กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ (ขอรหัส OTP ใหม่ได้ที่หน้ายืนยันอีเมล)",
+        needVerification: true,
+      });
+    }
+
+    // 5. ผ่านหมด — ออก token
+    signInResponse(res, user, "เข้าสู่ระบบสำเร็จ");
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์" });
   }
 };
 
@@ -220,16 +337,9 @@ exports.sendOtp = async (req, res) => {
     const user = rows[0];
     if (!user || !user.email || user.email.trim().toLowerCase() !== email.toLowerCase()) {
       // ไม่บอกชัดว่าอันไหนผิด เพื่อกันการเดาข้อมูลผู้ใช้ (account enumeration)
-      const mask = (e) => {
-        if (!e) return null;
-        const [loc, dom] = String(e).trim().split("@");
-        if (!dom) return "***";
-        return `${loc.slice(0, 2)}***@${dom}`;
-      };
       return res.status(400).json({
         success: false,
         message: "ไม่พบชื่อผู้ใช้ที่ตรงกับอีเมลนี้",
-        debug: { usernameFound: !!user, emailOnFileMasked: mask(user && user.email), emailTypedMasked: mask(email) },
       });
     }
 

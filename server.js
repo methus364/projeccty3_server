@@ -56,6 +56,8 @@ app.use('/api/register', authLimiter);
 app.use('/api/auth/send-otp', authLimiter);
 app.use('/api/auth/verify-otp', authLimiter);
 app.use('/api/auth/reset-password', authLimiter);
+app.use('/api/auth/verify-registration', authLimiter);
+app.use('/api/auth/resend-registration-otp', authLimiter);
 
 app.get('/', (req, res) => {
   res.send('Hello World');

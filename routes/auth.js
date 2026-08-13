@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 // 1. นำเข้า Controllers
-const { register, login, currentUser, getMembers, getMemberById, updateMember, deleteMember, updateProfile, sendOtp, verifyOtp, resetPassword } = require('../controllers/auth');
+const { register, login, currentUser, getMembers, getMemberById, updateMember, deleteMember, updateProfile, sendOtp, verifyOtp, resetPassword, verifyRegistration, resendRegistrationOtp } = require('../controllers/auth');
 
 // 2. นำเข้า Middleware ตรวจสอบสิทธิ์ (ปรับพาร์ทไฟล์ให้ตรงกับโฟลเดอร์ปัจจุบัน)
 const { authCheck, tenantCheck, adminCheck } = require('../middleweres/authCheck');
@@ -10,6 +10,10 @@ const { authCheck, tenantCheck, adminCheck } = require('../middleweres/authCheck
 // --- หน้าบ้านเข้าถึงได้ทั่วไป (Public) ---
 router.post('/register', register);
 router.post('/login', login);
+
+// --- ยืนยันอีเมลตอนสมัคร ด้วย OTP (Public) ---
+router.post('/auth/verify-registration', verifyRegistration);
+router.post('/auth/resend-registration-otp', resendRegistrationOtp);
 
 // --- ลืมรหัสผ่าน / แก้ไขข้อมูลผู้ใช้ ด้วย OTP ทางอีเมล (Public) ---
 router.post('/auth/send-otp', sendOtp);

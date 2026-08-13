@@ -159,9 +159,11 @@ async function findOrCreateMember(db, provider, { provider_id, email, full_name 
     if (!member) {
         const username = `${provider}_${provider_id}`;
         const displayName = full_name || email || `ผู้ใช้ ${provider}`;
+        // provider ยืนยันอีเมลให้แล้ว จึง email_verified_at = NOW() เลย (ไม่ต้องผ่าน OTP เหมือนสมัครเอง)
+        // ถ้า provider ไม่ส่งอีเมลมา (email = NULL) ก็ไม่ต้องมาร์คว่ายืนยัน
         const insRes = await db.query(
-            `INSERT INTO members (username, full_name, email, user_role)
-             VALUES ($1, $2, $3, 'Daily_Tenant')
+            `INSERT INTO members (username, full_name, email, user_role, email_verified_at)
+             VALUES ($1, $2, $3, 'Daily_Tenant', CASE WHEN $3::text IS NULL THEN NULL ELSE NOW() END)
              RETURNING *`,
             [username, displayName, email || null]
         );
