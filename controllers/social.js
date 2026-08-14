@@ -28,14 +28,18 @@ async function verifyGoogle(idToken) {
     // ตั้ง GOOGLE_CLIENT_IDS แบบคั่นด้วย comma ถ้ามีหลายตัว · ถ้าไม่ตั้ง ใช้ GOOGLE_CLIENT_ID (web) ตัวเดียว
     const allowedAudiences = (process.env.GOOGLE_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || "")
         .split(",")
-        .map((s) => s.trim())
+        .map((s) => s.trim().replace(/^["']|["']$/g, "")) // ตัดช่องว่าง + quote ที่เผลอติดมา (เช่นตอนตั้งค่าบน Render)
         .filter(Boolean);
     if (allowedAudiences.length === 0) throw new Error("ยังไม่ได้ตั้งค่า GOOGLE_CLIENT_ID ใน server/.env");
 
     const r = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
     const data = await r.json();
     if (!data.sub) throw new Error("id_token ของ Google ไม่ถูกต้อง");
-    if (!allowedAudiences.includes(data.aud)) throw new Error("token นี้ไม่ได้ออกให้แอปนี้ (audience ไม่ตรง)");
+    if (!allowedAudiences.includes(data.aud)) {
+        // log ให้เห็นค่าจริง (aud ที่ได้ vs ลิสต์ที่รับ) เวลาไล่ปัญหาบน Render
+        console.error("Google audience mismatch:", { got: data.aud, allowed: allowedAudiences });
+        throw new Error(`token นี้ไม่ได้ออกให้แอปนี้ (audience ไม่ตรง: got ${data.aud})`);
+    }
 
     return { provider_id: data.sub, email: data.email, full_name: data.name };
 }
