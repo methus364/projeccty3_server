@@ -98,6 +98,7 @@ test('socialLogin: provider ไม่รองรับ → 400', async () => {
 
 test('socialLogin: google + id_token ถูกต้อง (mock tokeninfo) → 200 + token', async () => {
   process.env.GOOGLE_CLIENT_ID = 'my-google-client-id';
+  process.env.GOOGLE_CLIENT_IDS = 'my-google-client-id'; // โค้ดอ่านตัวนี้ก่อน — ตั้งให้ตรงกับ aud ที่ mock
   const origFetch = global.fetch;
   // mock tokeninfo: aud ตรง client id ของเรา
   global.fetch = async () => ({ json: async () => ({ sub: 'g-sub-1', email: 'g@x.com', name: 'จี', aud: 'my-google-client-id' }) });
