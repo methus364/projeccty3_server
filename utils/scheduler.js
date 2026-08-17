@@ -217,11 +217,62 @@ function startMeterReminderCron() {
     console.log("[cron] ตั้งเวลาเตือนจดมิเตอร์แล้ว (ทุกวัน 09:00 · ทำงานวันสิ้นเดือน−1)");
 }
 
+// ============================================================
+// Cron เตือนผู้เช่าเรื่องบิลใกล้ครบกำหนด / ครบกำหนดวันนี้ — รันทุกวัน 08:00
+// เตือน 2 จังหวะ: ล่วงหน้า 3 วัน และ วันครบกำหนดพอดี (เฉพาะบิลที่ยังไม่ชำระ/ยกเลิก)
+// ============================================================
+async function remindDueInvoices() {
+    // ดึงบิลที่ครบกำหนด "วันนี้" หรือ "อีก 3 วัน" ที่ยังค้างชำระ พร้อมอีเมลผู้เช่า
+    const res = await pool.query(
+        `SELECT i.invoice_id, i.total_amount, i.due_date,
+                (i.due_date - CURRENT_DATE) AS days_left,
+                m.email, m.full_name, r.room_number
+         FROM invoices i
+         JOIN bookings b ON b.booking_id = i.booking_id
+         JOIN members  m ON m.member_id  = b.member_id
+         JOIN rooms    r ON r.room_id     = b.room_id
+         WHERE i.due_date IN (CURRENT_DATE, CURRENT_DATE + INTERVAL '3 day')
+           AND i.invoice_status NOT IN ('ชำระแล้ว', 'ยกเลิก')
+           AND m.email IS NOT NULL`
+    );
+
+    for (const inv of res.rows) {
+        const isToday = Number(inv.days_left) === 0;
+        const when = isToday ? "วันนี้" : "ในอีก 3 วัน";
+        try {
+            await sendMail({
+                to: inv.email,
+                subject: `${isToday ? "ถึงกำหนดชำระ" : "ใกล้ถึงกำหนดชำระ"}ค่าเช่าห้อง ${inv.room_number} - หอพัก Around Loei`,
+                text: `เรียน ${inv.full_name || "ผู้เช่า"}\n\n`
+                    + `บิลค่าเช่าห้อง ${inv.room_number} จะครบกำหนดชำระ${when} (${inv.due_date})\n`
+                    + `ยอดที่ต้องชำระ ฿${Number(inv.total_amount).toLocaleString()}\n`
+                    + `กรุณาชำระผ่านแอปเพื่อหลีกเลี่ยงค่าปรับล่าช้า 50 บาท/วัน\n\n`
+                    + `หอพัก Around Loei`,
+            });
+        } catch (err) {
+            console.error(`[cron] เตือนครบกำหนดถึง ${inv.email} ไม่สำเร็จ:`, err.message);
+        }
+    }
+    console.log(`[cron] เตือนบิลใกล้/ครบกำหนด: ${res.rows.length} ฉบับ`);
+}
+
+function startDueReminderCron() {
+    cron.schedule("0 8 * * *", async () => {
+        try {
+            await remindDueInvoices();
+        } catch (error) {
+            console.error("[cron] เตือนครบกำหนดชำระล้มเหลว:", error.message);
+        }
+    });
+    console.log("[cron] ตั้งเวลาเตือนบิลใกล้/ครบกำหนดแล้ว (ทุกวัน 08:00 · ล่วงหน้า 3 วัน + วันครบกำหนด)");
+}
+
 module.exports = {
     startMonthlyBillingCron,
     startHoldExpiryCron,
     startRenewalReminderCron,
     startMeterReminderCron,
+    startDueReminderCron,
     cancelExpiredHolds,
     getUnrecordedMeterRooms,
 };

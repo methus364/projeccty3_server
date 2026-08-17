@@ -5,7 +5,7 @@ const morgan = require('morgan');
 const { readdirSync } = require('fs');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { startMonthlyBillingCron, startHoldExpiryCron, startRenewalReminderCron, startMeterReminderCron } = require('./utils/scheduler');
+const { startMonthlyBillingCron, startHoldExpiryCron, startRenewalReminderCron, startMeterReminderCron, startDueReminderCron } = require('./utils/scheduler');
 
 // CORS — อนุญาต web frontend และ mobile app (React Native ไม่ส่ง origin header)
 const allowedOrigins = [
@@ -86,4 +86,5 @@ app.listen(port, () => {
   startHoldExpiryCron();
   startRenewalReminderCron();
   startMeterReminderCron();
+  startDueReminderCron();
 });

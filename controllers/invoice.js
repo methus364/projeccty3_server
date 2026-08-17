@@ -37,6 +37,21 @@ function getCurrentMonth() {
 }
 
 // ==========================================
+// Helper: คำนวณวันครบกำหนดชำระ = "วันเช็คอิน" ของเดือนถัดจากเดือนที่ออกบิล
+// เช่น เข้าพักวันที่ 16 → บิลเดือน ส.ค. ครบกำหนด 16 ก.ย.
+// กันวันที่ 29-31 ล้นเดือนที่สั้นกว่า ด้วยการ clamp เป็นวันสุดท้ายของเดือนนั้น
+// ถ้าไม่มี check_in_date ให้ fallback = วันที่ 1 ของเดือนถัดไป
+// month = 'YYYY-MM' (เดือนที่ออกบิล)
+// ==========================================
+function computeDueDate(month, checkInDate) {
+    const [year, mon] = month.split("-").map(Number); // mon = 1-based
+    const day = checkInDate ? new Date(checkInDate).getDate() : 1;
+    const lastOfNext = new Date(year, mon + 1, 0).getDate(); // index mon+1,day0 = วันสุดท้ายของเดือนถัดไป
+    const due = new Date(year, mon, Math.min(day, lastOfNext)); // index mon = เดือนถัดจากเดือนออกบิล
+    return due.toISOString().split("T")[0];
+}
+
+// ==========================================
 // Helper: คำนวณยอดบิลของ booking สำหรับเดือนที่ระบุ (ฝั่ง server เสมอ)
 // คืน { room_cost, water_cost, elec_cost, total_amount, details: [...] }
 // db = client (ใน transaction) หรือ pool ก็ได้
@@ -219,9 +234,9 @@ exports.createInvoice = async (req, res) => {
         // 3. คำนวณยอด (ฝั่ง server)
         const calc = await computeInvoice(client, booking, month);
 
-        // 4. กำหนดวันออกบิล = วันแรกของเดือนที่ระบุ, due_date default = +7 วัน
+        // 4. กำหนดวันออกบิล = วันแรกของเดือนที่ระบุ, due_date = วันเช็คอินของเดือนถัดไป (ถ้า admin ไม่ override)
         const invoiceDate = `${month}-01`;
-        const dueDate = due_date || new Date(new Date(invoiceDate).getTime() + 7 * 86400000).toISOString().split("T")[0];
+        const dueDate = due_date || computeDueDate(month, booking.check_in_date);
 
         // 5. insert header
         const invRes = await client.query(
@@ -538,7 +553,7 @@ exports.sendInvoiceEmail = async (req, res) => {
 exports.generateMonthly = async (req, res) => {
     const month = req.body.month || getCurrentMonth();
     const invoiceDate = `${month}-01`;
-    const dueDate = new Date(new Date(invoiceDate).getTime() + 7 * 86400000).toISOString().split("T")[0];
+    // due_date คิดต่อ booking (ตามวันเช็คอินของแต่ละห้อง) ในลูปด้านล่าง
 
     try {
         // หาห้องที่มีสัญญารายเดือน "มีผลใช้งาน" และยังไม่มีบิลในเดือนนี้
@@ -606,6 +621,7 @@ exports.generateMonthly = async (req, res) => {
                 }
 
                 const calc = await computeInvoice(client, booking, month);
+                const dueDate = computeDueDate(month, booking.check_in_date); // ครบกำหนด = วันเช็คอินของเดือนถัดไป
 
                 const invRes = await client.query(
                     `INSERT INTO invoices
