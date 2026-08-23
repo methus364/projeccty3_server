@@ -37,18 +37,12 @@ function getCurrentMonth() {
 }
 
 // ==========================================
-// Helper: คำนวณวันครบกำหนดชำระ = "วันเช็คอิน" ของเดือนถัดจากเดือนที่ออกบิล
-// เช่น เข้าพักวันที่ 16 → บิลเดือน ส.ค. ครบกำหนด 16 ก.ย.
-// กันวันที่ 29-31 ล้นเดือนที่สั้นกว่า ด้วยการ clamp เป็นวันสุดท้ายของเดือนนั้น
-// ถ้าไม่มี check_in_date ให้ fallback = วันที่ 1 ของเดือนถัดไป
+// Helper: คำนวณวันครบกำหนดชำระ = วันที่ 5 ของเดือนที่ออกบิล
+// (ออกบิลทุกวันที่ 1 → ครบกำหนดชำระทุกวันที่ 5 ของเดือนเดียวกัน)
 // month = 'YYYY-MM' (เดือนที่ออกบิล)
 // ==========================================
-function computeDueDate(month, checkInDate) {
-    const [year, mon] = month.split("-").map(Number); // mon = 1-based
-    const day = checkInDate ? new Date(checkInDate).getDate() : 1;
-    const lastOfNext = new Date(year, mon + 1, 0).getDate(); // index mon+1,day0 = วันสุดท้ายของเดือนถัดไป
-    const due = new Date(year, mon, Math.min(day, lastOfNext)); // index mon = เดือนถัดจากเดือนออกบิล
-    return due.toISOString().split("T")[0];
+function computeDueDate(month) {
+    return `${month}-05`;
 }
 
 // ==========================================
@@ -236,7 +230,7 @@ exports.createInvoice = async (req, res) => {
 
         // 4. กำหนดวันออกบิล = วันแรกของเดือนที่ระบุ, due_date = วันเช็คอินของเดือนถัดไป (ถ้า admin ไม่ override)
         const invoiceDate = `${month}-01`;
-        const dueDate = due_date || computeDueDate(month, booking.check_in_date);
+        const dueDate = due_date || computeDueDate(month);
 
         // 5. insert header
         const invRes = await client.query(
@@ -621,7 +615,7 @@ exports.generateMonthly = async (req, res) => {
                 }
 
                 const calc = await computeInvoice(client, booking, month);
-                const dueDate = computeDueDate(month, booking.check_in_date); // ครบกำหนด = วันเช็คอินของเดือนถัดไป
+                const dueDate = computeDueDate(month); // ครบกำหนด = วันที่ 5 ของเดือนที่ออกบิล
 
                 const invRes = await client.query(
                     `INSERT INTO invoices
