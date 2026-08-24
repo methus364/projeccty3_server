@@ -280,6 +280,58 @@ exports.lineExchange = async (req, res) => {
 };
 
 // ==========================================
+// GET /auth/line/callback — LINE redirect flow สำหรับ "มือถือ/APK" (แบบ B: server เป็นตัวกลาง)
+//   เหตุผล: LINE ไม่ยอมรับ custom scheme (myproject://) เป็น redirect_uri (รับแต่ https)
+//   flow: แอปเปิด LINE (redirect_uri = https ของ endpoint นี้) → LINE เด้ง ?code มาที่นี่
+//         → server แลก token + หา/สร้าง member → 302 เด้งกลับ deep link ของแอปพร้อม JWT
+//   redirect_uri ที่ใช้แลกต้องตรงเป๊ะกับ URL ของ endpoint นี้ (ที่แอปส่งไปตอน authorize)
+// ==========================================
+const LINE_APP_REDIRECT = process.env.LINE_APP_REDIRECT || "myproject://auth/line/callback";
+
+exports.lineMobileCallback = async (req, res) => {
+    const { code, state, error, error_description } = req.query;
+
+    // ประกอบ deep link กลับแอป (แนบ query อย่างปลอดภัย)
+    const backToApp = (params) => {
+        const url = new URL(LINE_APP_REDIRECT);
+        Object.entries(params).forEach(([k, v]) => {
+            if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+        });
+        return res.redirect(url.toString());
+    };
+
+    if (error) return backToApp({ error: error_description || error, state });
+    if (!code) return backToApp({ error: "ไม่ได้รับ code จาก LINE", state });
+
+    // redirect_uri ต้องตรงกับที่แอปใช้ตอน authorize = URL เต็มของ endpoint นี้ (บังคับ https เพราะ Render อยู่หลัง proxy)
+    const redirectUri = process.env.LINE_MOBILE_CALLBACK
+        || `https://${req.get("host")}${req.originalUrl.split("?")[0]}`;
+
+    const client = await pool.connect();
+    try {
+        const profile = await verifyLine(code, redirectUri);
+        await client.query("BEGIN");
+        const result = await findOrCreateMember(client, "line", profile);
+        await client.query("COMMIT");
+        const { token } = signToken(result.member);
+        return backToApp({
+            token,
+            isNewUser: result.isNewUser ? 1 : 0,
+            full_name: result.member.full_name || "",
+            email: result.member.email || "",
+            username: result.member.username || "",
+            state,
+        });
+    } catch (err) {
+        try { await client.query("ROLLBACK"); } catch (_) { /* ไม่มี transaction ค้าง */ }
+        console.error("lineMobileCallback Error:", err.message);
+        return backToApp({ error: err.message, state });
+    } finally {
+        client.release();
+    }
+};
+
+// ==========================================
 // POST /auth/google/exchange — Google (redirect flow)
 //   body: { code, redirect_uri }
 // ==========================================
