@@ -20,6 +20,26 @@ function signToken(member) {
     return { payload, token };
 }
 
+// ตรวจรูปแบบ username ที่ผู้ใช้ social ตั้งเอง — คืนข้อความ error ถ้าไม่ผ่าน, คืน null ถ้าผ่าน
+// กติกา: 4–20 ตัว ใช้ตัวอักษรอังกฤษ ตัวเลข จุด หรือขีดล่างเท่านั้น
+function validateUsername(username) {
+    if (!username) return "กรุณาตั้งชื่อผู้ใช้ (username)";
+    if (!/^[a-zA-Z0-9._]{4,20}$/.test(username)) {
+        return "username ต้องยาว 4–20 ตัว ใช้ตัวอักษรอังกฤษ ตัวเลข จุด หรือขีดล่างเท่านั้น";
+    }
+    return null;
+}
+
+// ตรวจรูปแบบเบอร์โทร (บังคับกรอกตอน complete profile) — เบอร์ไทย 9–10 หลัก ขึ้นต้น 0
+// คืน { error } ถ้าไม่ผ่าน, คืน { phone } เบอร์ที่ตัดช่องว่าง/ขีดออกแล้วถ้าผ่าน
+function validatePhone(phone_number) {
+    const clean = String(phone_number || "").replace(/[\s-]/g, "");
+    if (!/^0\d{8,9}$/.test(clean)) {
+        return { error: "กรุณากรอกเบอร์โทรให้ถูกต้อง (เช่น 08x-xxx-xxxx)" };
+    }
+    return { phone: clean };
+}
+
 // ---------- ตรวจ token กับแต่ละ provider → คืน { provider_id, email, full_name } ----------
 
 // Google: ตรวจ id_token ที่ tokeninfo endpoint + เช็ค audience ตรง client id ของเรา
@@ -366,11 +386,29 @@ exports.completeSocialProfile = async (req, res) => {
         return createMemberFromPending(req, res);
     }
     const memberId = req.user.id;
-    const { full_name, phone_number, password, user_role } = req.body;
+    const { username, phone_number, password, user_role } = req.body;
     try {
+        // 1. ตรวจ username ที่ผู้ใช้ตั้งเอง (บังคับ)
+        const usernameError = validateUsername((username || "").trim());
+        if (usernameError) return res.status(400).json({ success: false, message: usernameError });
+        const newUsername = username.trim();
+
+        // 2. ตรวจเบอร์โทร (บังคับกรอก)
+        const phoneCheck = validatePhone(phone_number);
+        if (phoneCheck.error) return res.status(400).json({ success: false, message: phoneCheck.error });
+
         const cur = await pool.query("SELECT * FROM members WHERE member_id = $1 LIMIT 1", [memberId]);
         if (!cur.rows[0]) return res.status(404).json({ success: false, message: "ไม่พบสมาชิก" });
         const c = cur.rows[0];
+
+        // 3. เช็คว่า username ซ้ำกับคนอื่นไหม (ยกเว้นตัวเอง)
+        const dup = await pool.query(
+            "SELECT 1 FROM members WHERE username = $1 AND member_id <> $2 LIMIT 1",
+            [newUsername, memberId]
+        );
+        if (dup.rows.length > 0) {
+            return res.status(400).json({ success: false, message: "ชื่อผู้ใช้นี้ถูกใช้แล้ว กรุณาตั้งชื่ออื่น" });
+        }
 
         // whitelist เฉพาะ role ผู้เช่า — ห้ามรับ Admin/ค่าอื่นจาก client (กัน privilege escalation)
         const finalRole = user_role === "Monthly_Tenant" ? "Monthly_Tenant" : "Daily_Tenant";
@@ -384,21 +422,20 @@ exports.completeSocialProfile = async (req, res) => {
             hashPassword = await bcrypt.hash(password, 10);
         }
 
+        // full_name ดึงมาจาก provider แล้วตอนสร้างบัญชี — ไม่แก้ตรงนี้ (คงชื่อจริงจาก Google/LINE)
         const updated = await pool.query(
-            `UPDATE members SET full_name = $1, phone_number = $2, password = $3, user_role = $4
+            `UPDATE members SET username = $1, phone_number = $2, password = $3, user_role = $4
              WHERE member_id = $5 RETURNING *`,
-            [
-                full_name ? full_name : c.full_name,
-                phone_number !== undefined ? phone_number : c.phone_number,
-                hashPassword,
-                finalRole,
-                memberId,
-            ]
+            [newUsername, phoneCheck.phone, hashPassword, finalRole, memberId]
         );
 
         const { payload, token } = signToken(updated.rows[0]);
         res.json({ success: true, payload, token, message: "บันทึกข้อมูลสมาชิกเรียบร้อย" });
     } catch (error) {
+        // กันชน unique constraint ของ username (เผลอซ้ำจังหวะเดียวกัน)
+        if (error.code === "23505") {
+            return res.status(400).json({ success: false, message: "ชื่อผู้ใช้นี้ถูกใช้แล้ว กรุณาตั้งชื่ออื่น" });
+        }
         console.error("completeSocialProfile Error:", error.message);
         res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
     }
@@ -407,16 +444,26 @@ exports.completeSocialProfile = async (req, res) => {
 // สร้าง member จริงจาก pending social (Google ใหม่) ตอนกดยืนยัน — ก่อนหน้านี้ยังไม่บันทึกลง DB เลย
 async function createMemberFromPending(req, res) {
     const { provider, provider_id, email, full_name: pendingName } = req.pendingSocial;
-    const { full_name, phone_number, password, user_role } = req.body;
+    const { username, phone_number, password, user_role } = req.body;
 
-    // บัญชีใหม่ต้องตั้งรหัสผ่าน (ให้ล็อกอินด้วย username/password ทีหลังได้)
+    // 1. username ที่ผู้ใช้ตั้งเอง (บังคับ)
+    const usernameError = validateUsername((username || "").trim());
+    if (usernameError) return res.status(400).json({ success: false, message: usernameError });
+    const newUsername = username.trim();
+
+    // 2. เบอร์โทร (บังคับกรอก)
+    const phoneCheck = validatePhone(phone_number);
+    if (phoneCheck.error) return res.status(400).json({ success: false, message: phoneCheck.error });
+
+    // 3. บัญชีใหม่ต้องตั้งรหัสผ่าน (ให้ล็อกอินด้วย username/password ทีหลังได้)
     if (!password || String(password).length < 6) {
         return res.status(400).json({ success: false, message: "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร" });
     }
 
     // whitelist เฉพาะ role ผู้เช่า — ห้ามรับ Admin/ค่าอื่นจาก client (กัน privilege escalation)
     const finalRole = user_role === "Monthly_Tenant" ? "Monthly_Tenant" : "Daily_Tenant";
-    const displayName = full_name || pendingName || email || `ผู้ใช้ ${provider}`;
+    // ชื่อ-นามสกุลดึงมาจาก provider (Google) โดยตรง — ไม่ให้ผู้ใช้พิมพ์เอง
+    const displayName = pendingName || email || `ผู้ใช้ ${provider}`;
 
     const client = await pool.connect();
     try {
@@ -435,14 +482,20 @@ async function createMemberFromPending(req, res) {
         if (existing.rows.length > 0) {
             member = existing.rows[0];
         } else {
+            // เช็ค username ซ้ำก่อนสร้าง (ให้ error อ่านง่ายกว่ารอชน unique constraint)
+            const dup = await client.query("SELECT 1 FROM members WHERE username = $1 LIMIT 1", [newUsername]);
+            if (dup.rows.length > 0) {
+                await client.query("ROLLBACK");
+                return res.status(400).json({ success: false, message: "ชื่อผู้ใช้นี้ถูกใช้แล้ว กรุณาตั้งชื่ออื่น" });
+            }
+
             const hashPassword = await bcrypt.hash(password, 10);
-            const username = `${provider}_${provider_id}`;
             // มาจาก provider ที่ยืนยันอีเมลแล้ว → ถ้ามีอีเมลถือว่ายืนยันทันที
             const emailVerifiedAt = email ? new Date() : null;
             const insRes = await client.query(
                 `INSERT INTO members (username, full_name, email, phone_number, password, user_role, email_verified_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-                [username, displayName, email || null, phone_number || null, hashPassword, finalRole, emailVerifiedAt]
+                [newUsername, displayName, email || null, phoneCheck.phone, hashPassword, finalRole, emailVerifiedAt]
             );
             member = insRes.rows[0];
             await client.query(
@@ -456,6 +509,10 @@ async function createMemberFromPending(req, res) {
         return res.json({ success: true, payload, token, message: "สมัครสมาชิกเรียบร้อย" });
     } catch (error) {
         await client.query("ROLLBACK");
+        // กันชน unique constraint ของ username (เผลอซ้ำจังหวะเดียวกัน)
+        if (error.code === "23505") {
+            return res.status(400).json({ success: false, message: "ชื่อผู้ใช้นี้ถูกใช้แล้ว กรุณาตั้งชื่ออื่น" });
+        }
         console.error("createMemberFromPending Error:", error.message);
         return res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการสมัครสมาชิก" });
     } finally {
