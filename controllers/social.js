@@ -254,7 +254,9 @@ exports.socialLogin = async (req, res) => {
         }
         if (!token) return res.status(400).json({ success: false, message: "กรุณาส่ง token" });
 
-        await loginWithProfile(res, provider, profile);
+        // deferCreate: ผู้ใช้ social ใหม่จะยังไม่ถูกบันทึกลง DB จนกว่าจะกดยืนยันที่หน้า register
+        // (บัญชีเดิม/อีเมลตรง ยังเข้าสู่ระบบ/ผูกบัญชีได้ตามปกติ)
+        await loginWithProfile(res, provider, profile, { deferCreate: true });
     } catch (error) {
         console.error("socialLogin Error:", error.message);
         res.status(400).json({ success: false, message: error.message });
@@ -311,8 +313,33 @@ exports.lineMobileCallback = async (req, res) => {
     try {
         const profile = await verifyLine(code, redirectUri);
         await client.query("BEGIN");
-        const result = await findOrCreateMember(client, "line", profile);
+        // deferCreate: ผู้ใช้ LINE ใหม่จะยังไม่ถูกบันทึกลง DB จนกว่าจะกดยืนยันที่หน้า register
+        const result = await findOrCreateMember(client, "line", profile, { deferCreate: true });
         await client.query("COMMIT");
+
+        // ผู้ใช้ใหม่แบบ deferred — ยังไม่มี member ใน DB → ออก pending token (ไปสร้างจริงตอน /auth/social/complete)
+        if (result.pending) {
+            const pendingToken = jwt.sign(
+                {
+                    type: "social_pending",
+                    provider: "line",
+                    provider_id: profile.provider_id,
+                    email: profile.email || null,
+                    full_name: profile.full_name || null,
+                },
+                SECRET,
+                { expiresIn: "15m" }
+            );
+            return backToApp({
+                token: pendingToken,
+                isNewUser: 1,
+                full_name: profile.full_name || "",
+                email: profile.email || "",
+                username: `line_${profile.provider_id}`,
+                state,
+            });
+        }
+
         const { token } = signToken(result.member);
         return backToApp({
             token,
