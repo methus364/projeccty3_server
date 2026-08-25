@@ -8,10 +8,12 @@ const rateLimit = require('express-rate-limit');
 const { startMonthlyBillingCron, startHoldExpiryCron, startRenewalReminderCron, startMeterReminderCron, startDueReminderCron } = require('./utils/scheduler');
 
 // CORS — อนุญาต web frontend และ mobile app (React Native ไม่ส่ง origin header)
+// CLIENT_ORIGIN รองรับหลายค่าคั่นด้วย comma (เช่นมีทั้ง web client และ PWA บน expo hosting)
 const allowedOrigins = [
-  process.env.CLIENT_ORIGIN,
+  ...(process.env.CLIENT_ORIGIN || '').split(',').map((s) => s.trim()),
   'http://localhost:5173',
   'http://localhost:8080',
+  'https://panuwatkidtooks-team-myproject.expo.app', // PWA (เปิดผ่าน Safari/เบราว์เซอร์)
 ].filter(Boolean);
 
 // dev: อนุญาต localhost/127.0.0.1 ทุกพอร์ต (Vite อาจเด้งพอร์ต 5174 ถ้า 5173 ไม่ว่าง)
