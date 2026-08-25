@@ -292,7 +292,9 @@ exports.lineExchange = async (req, res) => {
     }
     try {
         const profile = await verifyLine(code, redirect_uri);
-        await loginWithProfile(res, "line", profile);
+        // deferCreate: ผู้ใช้ LINE ใหม่จะยังไม่ถูกบันทึกจนกว่าจะกรอกข้อมูลครบที่หน้า complete-profile
+        // (กันปัญหา member ถูกสร้างค้างไว้ทั้งที่กรอกข้อมูลไม่ครบ) · บัญชีเดิม/อีเมลตรง ยังเข้าได้ตามปกติ
+        await loginWithProfile(res, "line", profile, { deferCreate: true });
     } catch (error) {
         console.error("lineExchange Error:", error.message);
         res.status(400).json({ success: false, message: error.message });
@@ -386,14 +388,18 @@ exports.completeSocialProfile = async (req, res) => {
         return createMemberFromPending(req, res);
     }
     const memberId = req.user.id;
-    const { username, phone_number, password, user_role } = req.body;
+    const { username, full_name, phone_number, password, user_role } = req.body;
     try {
         // 1. ตรวจ username ที่ผู้ใช้ตั้งเอง (บังคับ)
         const usernameError = validateUsername((username || "").trim());
         if (usernameError) return res.status(400).json({ success: false, message: usernameError });
         const newUsername = username.trim();
 
-        // 2. ตรวจเบอร์โทร (บังคับกรอก)
+        // 2. ชื่อ-นามสกุล (บังคับ)
+        const displayName = String(full_name || "").trim();
+        if (!displayName) return res.status(400).json({ success: false, message: "กรุณากรอกชื่อ-นามสกุล" });
+
+        // 3. ตรวจเบอร์โทร (บังคับกรอก)
         const phoneCheck = validatePhone(phone_number);
         if (phoneCheck.error) return res.status(400).json({ success: false, message: phoneCheck.error });
 
@@ -422,11 +428,10 @@ exports.completeSocialProfile = async (req, res) => {
             hashPassword = await bcrypt.hash(password, 10);
         }
 
-        // full_name ดึงมาจาก provider แล้วตอนสร้างบัญชี — ไม่แก้ตรงนี้ (คงชื่อจริงจาก Google/LINE)
         const updated = await pool.query(
-            `UPDATE members SET username = $1, phone_number = $2, password = $3, user_role = $4
-             WHERE member_id = $5 RETURNING *`,
-            [newUsername, phoneCheck.phone, hashPassword, finalRole, memberId]
+            `UPDATE members SET username = $1, full_name = $2, phone_number = $3, password = $4, user_role = $5
+             WHERE member_id = $6 RETURNING *`,
+            [newUsername, displayName, phoneCheck.phone, hashPassword, finalRole, memberId]
         );
 
         const { payload, token } = signToken(updated.rows[0]);
@@ -443,27 +448,31 @@ exports.completeSocialProfile = async (req, res) => {
 
 // สร้าง member จริงจาก pending social (Google ใหม่) ตอนกดยืนยัน — ก่อนหน้านี้ยังไม่บันทึกลง DB เลย
 async function createMemberFromPending(req, res) {
-    const { provider, provider_id, email, full_name: pendingName } = req.pendingSocial;
-    const { username, phone_number, password, user_role } = req.body;
+    const { provider, provider_id, email } = req.pendingSocial;
+    const { username, full_name, phone_number, password, user_role } = req.body;
 
     // 1. username ที่ผู้ใช้ตั้งเอง (บังคับ)
     const usernameError = validateUsername((username || "").trim());
     if (usernameError) return res.status(400).json({ success: false, message: usernameError });
     const newUsername = username.trim();
 
-    // 2. เบอร์โทร (บังคับกรอก)
+    // 2. ชื่อ-นามสกุล (บังคับ — ฟอร์ม prefill จาก provider ให้แล้ว แต่ผู้ใช้ต้องยืนยัน/แก้ได้)
+    const displayName = String(full_name || "").trim();
+    if (!displayName) {
+        return res.status(400).json({ success: false, message: "กรุณากรอกชื่อ-นามสกุล" });
+    }
+
+    // 3. เบอร์โทร (บังคับกรอก)
     const phoneCheck = validatePhone(phone_number);
     if (phoneCheck.error) return res.status(400).json({ success: false, message: phoneCheck.error });
 
-    // 3. บัญชีใหม่ต้องตั้งรหัสผ่าน (ให้ล็อกอินด้วย username/password ทีหลังได้)
+    // 4. บัญชีใหม่ต้องตั้งรหัสผ่าน (ให้ล็อกอินด้วย username/password ทีหลังได้)
     if (!password || String(password).length < 6) {
         return res.status(400).json({ success: false, message: "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร" });
     }
 
     // whitelist เฉพาะ role ผู้เช่า — ห้ามรับ Admin/ค่าอื่นจาก client (กัน privilege escalation)
     const finalRole = user_role === "Monthly_Tenant" ? "Monthly_Tenant" : "Daily_Tenant";
-    // ชื่อ-นามสกุลดึงมาจาก provider (Google) โดยตรง — ไม่ให้ผู้ใช้พิมพ์เอง
-    const displayName = pendingName || email || `ผู้ใช้ ${provider}`;
 
     const client = await pool.connect();
     try {
