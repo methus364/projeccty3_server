@@ -557,6 +557,89 @@ async function createMemberFromPending(req, res) {
 }
 
 // ==========================================
+// ผูกบัญชี social เข้ากับสมาชิกที่ล็อกอินอยู่ (ใช้ตอนกดปุ่ม "เชื่อม" ในหน้าโปรไฟล์)
+//   คืน { linked } ถ้าผูกใหม่สำเร็จ · { alreadyLinked } ถ้าผูกกับตัวเองอยู่แล้ว
+//   · { conflict } ถ้าบัญชี social นี้ถูกผูกกับ "ผู้ใช้อื่น" ไปแล้ว (กันสวมบัญชี)
+// ==========================================
+async function linkSocialToMember(memberId, provider, provider_id) {
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+        // ล็อกตาม provider+provider_id กันสอง request เชื่อมพร้อมกันแล้วเกิดแถวซ้ำ
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`${provider}:${provider_id}`]);
+
+        // เช็คว่าบัญชี social นี้ถูกผูกไว้แล้วหรือยัง
+        const existing = await client.query(
+            `SELECT member_id FROM social_accounts WHERE provider = $1 AND provider_id = $2`,
+            [provider, provider_id]
+        );
+        if (existing.rows.length > 0) {
+            const ownerId = existing.rows[0].member_id;
+            await client.query("COMMIT");
+            // ผูกกับตัวเองอยู่แล้ว = ถือว่าสำเร็จ · ผูกกับคนอื่น = ปฏิเสธ
+            if (String(ownerId) === String(memberId)) return { alreadyLinked: true };
+            return { conflict: true };
+        }
+
+        await client.query(
+            `INSERT INTO social_accounts (member_id, provider, provider_id) VALUES ($1, $2, $3)`,
+            [memberId, provider, provider_id]
+        );
+        await client.query("COMMIT");
+        return { linked: true };
+    } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+    } finally {
+        client.release();
+    }
+}
+
+// ==========================================
+// POST /auth/line/link — เชื่อม LINE เข้าบัญชีที่ล็อกอินอยู่ (authCheck)
+//   body: { code, redirect_uri } — เหมือน exchange แต่ผูกกับ member ปัจจุบันแทนการ login
+// ==========================================
+exports.lineLink = async (req, res) => {
+    const { code, redirect_uri } = req.body;
+    if (!code || !redirect_uri) {
+        return res.status(400).json({ success: false, message: "กรุณาส่ง code และ redirect_uri" });
+    }
+    try {
+        const profile = await verifyLine(code, redirect_uri);
+        const result = await linkSocialToMember(req.user.id, "line", profile.provider_id);
+        if (result.conflict) {
+            return res.status(400).json({ success: false, message: "บัญชี LINE นี้ถูกเชื่อมกับผู้ใช้อื่นแล้ว" });
+        }
+        res.json({ success: true, message: result.alreadyLinked ? "บัญชี LINE นี้เชื่อมอยู่แล้ว" : "เชื่อมบัญชี LINE สำเร็จ" });
+    } catch (error) {
+        console.error("lineLink Error:", error.message);
+        res.status(400).json({ success: false, message: error.message });
+    }
+};
+
+// ==========================================
+// POST /auth/google/link — เชื่อม Google เข้าบัญชีที่ล็อกอินอยู่ (authCheck)
+//   body: { code, redirect_uri }
+// ==========================================
+exports.googleLink = async (req, res) => {
+    const { code, redirect_uri } = req.body;
+    if (!code || !redirect_uri) {
+        return res.status(400).json({ success: false, message: "กรุณาส่ง code และ redirect_uri" });
+    }
+    try {
+        const profile = await verifyGoogleCode(code, redirect_uri);
+        const result = await linkSocialToMember(req.user.id, "google", profile.provider_id);
+        if (result.conflict) {
+            return res.status(400).json({ success: false, message: "บัญชี Google นี้ถูกเชื่อมกับผู้ใช้อื่นแล้ว" });
+        }
+        res.json({ success: true, message: result.alreadyLinked ? "บัญชี Google นี้เชื่อมอยู่แล้ว" : "เชื่อมบัญชี Google สำเร็จ" });
+    } catch (error) {
+        console.error("googleLink Error:", error.message);
+        res.status(400).json({ success: false, message: error.message });
+    }
+};
+
+// ==========================================
 // GET /my-social-accounts — ดูบัญชี social ที่ผูกไว้ (ผู้ล็อกอิน)
 // ==========================================
 exports.getMySocialAccounts = async (req, res) => {
