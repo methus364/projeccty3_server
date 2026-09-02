@@ -2,7 +2,7 @@ const pool = require("../config/db");
 const { _loadFullInvoice, _calculateLateFee } = require("./invoice");
 const { buildInvoicePdf } = require("../utils/invoicePdf");
 const { buildPromptpayQr } = require("../utils/promptpayQr");
-const { sendInvoiceMail } = require("../config/mailer");
+const { sendInvoiceMail, sendMail } = require("../config/mailer");
 const { uploadSlip } = require("../config/supabase");
 const { readSlipQr, verifySlipImage } = require("../utils/slipQr");
 const { createPromptPayCharge, retrieveCharge } = require("../config/omise");
@@ -266,23 +266,19 @@ exports.createPayment = async (req, res) => {
             }
         } else {
             await client.query("COMMIT");
-            // ลูกค้าอัปสลิปแล้วการจองถูกยืนยัน → ออกใบเสร็จ + รายละเอียดการจอง ส่งอีเมลกลับทันที
-            if (bookingConfirmed) {
-                const fullInvoice = await _loadFullInvoice(pool, invoice_id);
-                const mail = await emailReceipt(fullInvoice, payment);
-                receiptMsg = " " + mail.message;
-            }
+            // ลูกค้าอัปสลิปแล้ว "ล็อกห้องไว้ให้" (booking → ยืนยันการจอง, หยุด hold)
+            // แต่ "ยังไม่ออกใบเสร็จ" — รอแอดมินกดยืนยันการตรวจสอบสลิปก่อน (กันออกใบเสร็จให้สลิปที่ยังไม่ตรวจ)
         }
 
         res.status(201).json({
             success: true,
             data: payment,
             bookingConfirmed,
-            // ยืนยันการจองแล้ว → บอกว่าออกใบเสร็จให้ · บิลอื่น (เช่นรายเดือน) → รอแอดมินตรวจ
+            // เงินสด(แอดมิน)=ยืนยันทันที · อัปสลิป=รอแอดมินตรวจ ยังไม่ออกใบเสร็จ
             message: isCashByAdmin
                 ? "บันทึกการชำระเงินสำเร็จ" + receiptMsg
                 : (bookingConfirmed
-                    ? "ชำระเงินสำเร็จ ยืนยันการจองและออกใบเสร็จให้แล้ว" + receiptMsg
+                    ? "แจ้งชำระเงินสำเร็จ ระบบล็อกห้องไว้ให้แล้ว รอแอดมินตรวจสอบสลิป"
                     : "แจ้งชำระเงินสำเร็จ รอแอดมินตรวจสอบ"),
         });
 
@@ -338,6 +334,31 @@ exports.verifyPayment = async (req, res) => {
         // คิดสถานะบิลใหม่จากยอดที่ยืนยันแล้วทั้งหมด
         const result = await recomputeInvoiceStatus(client, invoiceId);
 
+        // ปฏิเสธสลิป → ปลดล็อกห้องที่ค้างจากสลิปที่ไม่ผ่าน
+        //   ยกเลิกเฉพาะการจอง "ก่อนเช็คอิน" (รอชำระมัดจำ/ยืนยันการจอง) ที่ไม่มีการชำระยืนยันเหลืออยู่
+        //   (บิลรายเดือนของคนที่ 'กำลังเข้าพัก' อยู่ จะไม่ถูกยกเลิก — แค่ปฏิเสธการชำระ)
+        let bookingCancelled = false;
+        if (action === "reject") {
+            const bkRes = await client.query(
+                `SELECT b.booking_id, b.booking_status, b.room_id
+                 FROM bookings b
+                 JOIN invoices i ON b.booking_id = i.booking_id
+                 WHERE i.invoice_id = $1 FOR UPDATE`,
+                [invoiceId]
+            );
+            const bk = bkRes.rows[0];
+            if (bk
+                && ["รอชำระมัดจำ", "ยืนยันการจอง"].includes(bk.booking_status)
+                && result.status === "ยังไม่ชำระ") {
+                await client.query(
+                    `UPDATE bookings SET booking_status = 'ยกเลิก', hold_expires_at = NULL WHERE booking_id = $1`,
+                    [bk.booking_id]
+                );
+                await client.query(`UPDATE rooms SET room_status = 'ว่าง' WHERE room_id = $1`, [bk.room_id]);
+                bookingCancelled = true;
+            }
+        }
+
         await client.query("COMMIT");
 
         // ชำระครบ → ออกใบเสร็จ + ส่งอีเมล (หลัง commit, best-effort)
@@ -352,10 +373,35 @@ exports.verifyPayment = async (req, res) => {
             receiptMsg = " " + mail.message;
         }
 
+        // ปฏิเสธ → แจ้งลูกค้าทางอีเมล (best-effort หลัง commit)
+        if (action === "reject") {
+            try {
+                const inv = await _loadFullInvoice(pool, invoiceId);
+                if (inv && inv.guest_email) {
+                    await sendMail({
+                        to: inv.guest_email,
+                        subject: "หลักฐานการชำระเงินไม่ผ่านการตรวจสอบ - หอพัก Around Loei",
+                        text:
+                            `เรียนคุณ ${inv.guest_name || ""}\n\n`
+                            + `หลักฐานการชำระเงินสำหรับห้อง ${inv.room_number} ไม่ผ่านการตรวจสอบ\n`
+                            + (bookingCancelled
+                                ? "การจองถูกยกเลิกและปล่อยห้องคืนแล้ว หากต้องการเข้าพักกรุณาจองใหม่อีกครั้ง หรือติดต่อเจ้าหน้าที่\n"
+                                : "กรุณาชำระเงินใหม่อีกครั้ง หรือติดต่อเจ้าหน้าที่เพื่อตรวจสอบ\n")
+                            + `\nหอพัก Around Loei`,
+                    });
+                }
+            } catch (mailErr) {
+                console.error("แจ้งเตือนปฏิเสธการชำระไม่สำเร็จ:", mailErr.message);
+            }
+        }
+
         res.json({
             success: true,
-            data: { payment_id: Number(id), payment_status: newStatus, invoice_status: result.status },
-            message: (action === "approve" ? "ยืนยันการชำระเงินสำเร็จ" : "ปฏิเสธการชำระเงินแล้ว") + receiptMsg,
+            data: { payment_id: Number(id), payment_status: newStatus, invoice_status: result.status, bookingCancelled },
+            message: (action === "approve"
+                ? "ยืนยันการชำระเงินสำเร็จ"
+                : (bookingCancelled ? "ปฏิเสธการชำระเงินและยกเลิกการจอง (คืนห้องว่างแล้ว)" : "ปฏิเสธการชำระเงินแล้ว"))
+                + receiptMsg,
         });
 
     } catch (error) {
@@ -942,20 +988,11 @@ exports.createBatchPayment = async (req, res) => {
 
         await client.query("COMMIT");
 
-        // ออกใบเสร็จต่อห้อง (best-effort นอก transaction — ล้มเหลวไม่ทำให้คำขอล้ม)
-        for (const { invoiceId, payment } of confirmed) {
-            try {
-                const fullInvoice = await _loadFullInvoice(pool, invoiceId);
-                await emailReceipt(fullInvoice, payment);
-            } catch (e) {
-                console.error("Batch receipt mail error:", e.message);
-            }
-        }
-
+        // ไม่ออกใบเสร็จตอนนี้ — รอแอดมินกดยืนยันการตรวจสอบสลิปของแต่ละบิลก่อน (ออกใบเสร็จตอน verify)
         res.status(201).json({
             success: true,
             confirmedCount: confirmed.length,
-            message: "ชำระเงินรวมสำเร็จ ยืนยันการจองทุกห้องแล้ว",
+            message: "แจ้งชำระเงินรวมสำเร็จ ระบบล็อกห้องไว้ให้แล้ว รอแอดมินตรวจสอบสลิป",
         });
     } catch (error) {
         try { await client.query("ROLLBACK"); } catch (e) { /* ignore */ }

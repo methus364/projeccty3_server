@@ -108,13 +108,13 @@ exports.createBooking = async (req, res) => {
         // 1. ดึงราคาห้องพักจากตาราง rooms (ทั้ง daily และ monthly)
         // ล็อกแถวห้องไว้ก่อน (FOR UPDATE) กันสองคนจองห้อง/ช่วงเวลาเดียวกันพร้อมกันแล้วผ่าน overlap check ทั้งคู่
         const priceRes = await client.query(
-            `SELECT room_price, price_monthly, room_status, room_number FROM rooms WHERE room_id = $1 LIMIT 1 FOR UPDATE`,
+            `SELECT room_price, price_monthly, room_status, room_number, type_name FROM rooms WHERE room_id = $1 LIMIT 1 FOR UPDATE`,
             [roomId]
         );
 
         if (priceRes.rows.length === 0) throw new Error("ไม่พบข้อมูลห้องพักนี้ในระบบ");
 
-        const { room_number, room_price, price_monthly, room_status } = priceRes.rows[0];
+        const { room_number, room_price, price_monthly, room_status, type_name } = priceRes.rows[0];
 
         if (room_status === 'ปิดปรับปรุง') throw new Error("ห้องพักนี้ปิดปรับปรุงอยู่ ไม่สามารถจองได้");
 
@@ -198,6 +198,7 @@ exports.createBooking = async (req, res) => {
             bookingId,
             bookingRef,
             roomNumber: room_number,
+            typeName: type_name,
             checkInDate: startDate,
             checkOutDate: endDate,
             bookedAt,
@@ -694,6 +695,24 @@ exports.editBooking = async (req, res) => {
         const finalStatus = status || current.booking_status;
         if (finalStatus === 'ยกเลิก' || finalStatus === 'ย้ายออกแล้ว') {
             await client.query(`UPDATE rooms SET room_status = 'ว่าง' WHERE room_id = $1`, [targetRoomId]);
+
+            // ยกเลิกการจอง → เก็บกวาดบิล/การชำระที่ผูกกับการจองนี้ ไม่ให้ค้างในระบบ
+            //   - บิลที่ยังค้าง (ยังไม่ชำระ/ชำระบางส่วน) → 'ยกเลิก' · บิล 'ชำระแล้ว' คงไว้ (เงินที่รับจริง เช่น มัดจำที่ริบ)
+            //   - การชำระที่ยัง 'รอตรวจ' → 'ปฏิเสธ' (ไม่มีความหมายแล้วเมื่อการจองถูกยกเลิก)
+            //   * 'ย้ายออกแล้ว' ไม่ทำ เพราะบิลค้างตอนย้ายออก = หนี้จริงที่ต้องตามเก็บ
+            if (finalStatus === 'ยกเลิก') {
+                await client.query(
+                    `UPDATE invoices SET invoice_status = 'ยกเลิก'
+                     WHERE booking_id = $1 AND invoice_status NOT IN ('ชำระแล้ว', 'ยกเลิก')`,
+                    [id]
+                );
+                await client.query(
+                    `UPDATE payments SET payment_status = 'ปฏิเสธ'
+                     WHERE payment_status = 'รอตรวจ'
+                       AND invoice_id IN (SELECT invoice_id FROM invoices WHERE booking_id = $1)`,
+                    [id]
+                );
+            }
         } else if (finalStatus === 'กำลังเข้าพัก' || finalStatus === 'ยืนยันการจอง') {
             await client.query(`UPDATE rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`, [targetRoomId]);
         }
