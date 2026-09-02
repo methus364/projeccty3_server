@@ -6,6 +6,7 @@ const { readdirSync } = require('fs');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { startMonthlyBillingCron, startHoldExpiryCron, startRenewalReminderCron, startMeterReminderCron, startDueReminderCron } = require('./utils/scheduler');
+const { ensureSchema } = require('./utils/ensureSchema');
 
 // CORS — อนุญาต web frontend และ mobile app (React Native ไม่ส่ง origin header)
 // CLIENT_ORIGIN รองรับหลายค่าคั่นด้วย comma (เช่นมีทั้ง web client และ PWA บน expo hosting)
@@ -82,8 +83,10 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(port, () => {
+app.listen(port, async () => {
   console.log(`Server is running on http://localhost:${port}`);
+  // สร้างคอลัมน์ที่ flow อีเมล/OTP ต้องใช้ให้ครบก่อน (idempotent) — กัน register/login/reset 500
+  await ensureSchema();
   startMonthlyBillingCron();
   startHoldExpiryCron();
   startRenewalReminderCron();
