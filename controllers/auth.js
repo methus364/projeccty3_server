@@ -321,12 +321,16 @@ exports.deleteMember = async (req, res) => {
 //  ลืมรหัสผ่าน / แก้ไขข้อมูลผู้ใช้ ด้วย OTP ทางอีเมล
 // ============================================================
 
-// ตัวช่วย: หาสมาชิกจาก username (คืน { member_id, email }) หรือ null ถ้าไม่พบ
-// เทียบ username แบบไม่สนตัวพิมพ์ + ตัดช่องว่าง (กันกรณี DB เก็บ "Kimkim"/"kimkim ")
-async function findMemberByUsername(username) {
+// ตัวช่วย: หาสมาชิกจาก "อีเมลหรือชื่อผู้ใช้" (คืน { member_id, username, email }) หรือ null ถ้าไม่พบ
+// เทียบแบบไม่สนตัวพิมพ์ + ตัดช่องว่าง (กันกรณี DB เก็บ "Kimkim"/"kimkim ")
+// ผู้ใช้ที่ลืมรหัสมักจำ username ไม่ได้ จึงให้กรอกอีเมลแทนได้ด้วย
+async function findMemberByIdentifier(identifier) {
   const { rows } = await pool.query(
-    'SELECT member_id, email FROM Members WHERE LOWER(BTRIM(username)) = LOWER(BTRIM($1)) LIMIT 1',
-    [username]
+    `SELECT member_id, username, email FROM Members
+       WHERE LOWER(BTRIM(username)) = LOWER(BTRIM($1))
+          OR LOWER(BTRIM(email))    = LOWER(BTRIM($1))
+       LIMIT 1`,
+    [identifier]
   );
   return rows[0] || null;
 }
@@ -341,32 +345,33 @@ function maskEmail(email) {
 }
 
 // --- ส่งรหัส OTP ไปที่อีเมล ---
-// รับ { username } → หาอีเมลของบัญชีนั้นจาก DB แล้วส่ง OTP ไปให้ (ผู้ใช้ไม่ต้องกรอกอีเมล)
+// รับ { identifier } (อีเมลหรือชื่อผู้ใช้) → หาอีเมลของบัญชีนั้นจาก DB แล้วส่ง OTP ไปให้
+// (รองรับ field เดิม email/username เพื่อความเข้ากันได้ย้อนหลัง)
 exports.sendOtp = async (req, res) => {
   try {
-    const username = (req.body.username || "").trim();
+    const identifier = (req.body.identifier || req.body.email || req.body.username || "").trim();
 
-    if (!username) {
-      return res.status(400).json({ success: false, message: "กรุณากรอกชื่อผู้ใช้" });
+    if (!identifier) {
+      return res.status(400).json({ success: false, message: "กรุณากรอกอีเมลหรือชื่อผู้ใช้" });
     }
 
-    // หาบัญชีจาก username แล้วดึงอีเมลที่ผูกไว้มาใช้ส่ง OTP
-    const user = await findMemberByUsername(username);
+    // หาบัญชีจากอีเมลหรือชื่อผู้ใช้ แล้วดึงอีเมลที่ผูกไว้มาใช้ส่ง OTP
+    const user = await findMemberByIdentifier(identifier);
     if (!user || !user.email) {
       return res.status(400).json({
         success: false,
-        message: "ไม่พบชื่อผู้ใช้นี้ หรือบัญชีนี้ไม่มีอีเมลสำหรับรับรหัส OTP",
+        message: "ไม่พบบัญชีนี้ หรือบัญชีนี้ไม่มีอีเมลสำหรับรับรหัส OTP",
       });
     }
 
-    // สร้าง OTP (คีย์ด้วย username + อีเมลจาก DB) แล้วส่งอีเมล
-    const code = createOtp(username, user.email);
+    // สร้าง OTP (คีย์ด้วย username + อีเมลจาก DB เสมอ ให้ทุกขั้นตอนใช้คีย์เดียวกัน) แล้วส่งอีเมล
+    const code = createOtp(user.username, user.email);
     try {
       await sendMail({
         to: user.email,
         subject: "รหัส OTP สำหรับเปลี่ยนรหัสผ่าน — หอพัก Around Loei",
         text:
-          `สวัสดีคุณ ${username}\n\n` +
+          `สวัสดีคุณ ${user.username}\n\n` +
           `รหัส OTP สำหรับเปลี่ยนรหัสผ่านของคุณคือ: ${code}\n\n` +
           `รหัสนี้จะหมดอายุใน 5 นาที กรุณาอย่าเปิดเผยรหัสนี้แก่ผู้อื่น\n` +
           `หากคุณไม่ได้เป็นผู้ร้องขอ กรุณาเพิกเฉยต่ออีเมลฉบับนี้`,
@@ -389,23 +394,23 @@ exports.sendOtp = async (req, res) => {
 };
 
 // --- ตรวจสอบรหัส OTP ---
-// รับ { username, otp } → หาอีเมลของบัญชีนั้นจาก DB มาใช้เป็นคีย์ตรวจ OTP
+// รับ { identifier, otp } → หาบัญชีจากอีเมล/ชื่อผู้ใช้ แล้วใช้ username+email จาก DB เป็นคีย์ตรวจ OTP
 exports.verifyOtp = async (req, res) => {
   try {
-    const username = (req.body.username || "").trim();
+    const identifier = (req.body.identifier || req.body.email || req.body.username || "").trim();
     const otp = (req.body.otp || "").trim();
 
-    if (!username || !otp) {
+    if (!identifier || !otp) {
       return res.status(400).json({ success: false, message: "ข้อมูลไม่ครบถ้วน" });
     }
 
-    // ดึงอีเมลที่ผูกกับ username (ต้องตรงกับตอนสร้าง OTP)
-    const user = await findMemberByUsername(username);
+    // หาบัญชีจากอีเมล/ชื่อผู้ใช้ (ต้องตรงกับตอนสร้าง OTP)
+    const user = await findMemberByIdentifier(identifier);
     if (!user || !user.email) {
-      return res.status(400).json({ success: false, message: "ไม่พบชื่อผู้ใช้นี้" });
+      return res.status(400).json({ success: false, message: "ไม่พบบัญชีนี้" });
     }
 
-    const result = verifyOtp(username, user.email, otp);
+    const result = verifyOtp(user.username, user.email, otp);
     if (!result.ok) {
       const messages = {
         expired: "รหัส OTP หมดอายุแล้ว กรุณาขอรหัสใหม่",
@@ -423,27 +428,27 @@ exports.verifyOtp = async (req, res) => {
 };
 
 // --- ตั้งรหัสผ่านใหม่ (ต้องยืนยัน OTP สำเร็จมาก่อน) ---
-// รับ { username, newPassword } → หาอีเมลของบัญชีนั้นจาก DB มาใช้เป็นคีย์
+// รับ { identifier, newPassword } → หาบัญชีจากอีเมล/ชื่อผู้ใช้ มาใช้ username+email เป็นคีย์
 exports.resetPassword = async (req, res) => {
   try {
-    const username = (req.body.username || "").trim();
+    const identifier = (req.body.identifier || req.body.email || req.body.username || "").trim();
     const newPassword = req.body.newPassword || "";
 
-    if (!username || !newPassword) {
+    if (!identifier || !newPassword) {
       return res.status(400).json({ success: false, message: "ข้อมูลไม่ครบถ้วน" });
     }
     if (newPassword.length < 6) {
       return res.status(400).json({ success: false, message: "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร" });
     }
 
-    // หาบัญชีจาก username (ใช้อีเมลจาก DB เป็นคีย์ตรวจสถานะ OTP)
-    const user = await findMemberByUsername(username);
+    // หาบัญชีจากอีเมล/ชื่อผู้ใช้ (ใช้ username+email จาก DB เป็นคีย์ตรวจสถานะ OTP)
+    const user = await findMemberByIdentifier(identifier);
     if (!user || !user.email) {
-      return res.status(400).json({ success: false, message: "ไม่พบชื่อผู้ใช้นี้" });
+      return res.status(400).json({ success: false, message: "ไม่พบบัญชีนี้" });
     }
 
     // ต้องผ่านการยืนยัน OTP มาก่อนเท่านั้น (กันการตั้งรหัสผ่านโดยไม่ยืนยันตัวตน)
-    if (!isVerified(username, user.email)) {
+    if (!isVerified(user.username, user.email)) {
       return res.status(403).json({ success: false, message: "กรุณายืนยันรหัส OTP ก่อนตั้งรหัสผ่านใหม่" });
     }
 
@@ -454,7 +459,7 @@ exports.resetPassword = async (req, res) => {
     );
 
     // ใช้ OTP ครั้งเดียวแล้วทิ้ง
-    clearOtp(username, user.email);
+    clearOtp(user.username, user.email);
 
     res.json({ success: true, message: "เปลี่ยนรหัสผ่านเรียบร้อยแล้ว" });
   } catch (error) {
