@@ -354,28 +354,71 @@ async function sendWithRetry(mailOptions) {
     throw lastErr;
 }
 
+// รวม provider ที่ "ตั้งค่าไว้" ตามลำดับความสำคัญ — ตัวไหนไม่มี key จะถูกข้าม
+// คืน array ของ { name, send } เพื่อให้ตัวส่งลองไล่ทีละตัว
+function enabledProviders() {
+    const list = [];
+    if (SMTP2GO_API_KEY) list.push({ name: "SMTP2GO", send: sendViaSmtp2go });
+    if (SENDGRID_API_KEY) list.push({ name: "SendGrid", send: sendViaSendgrid });
+    if (RESEND_API_KEY) list.push({ name: "Resend", send: sendViaResend });
+    if (MAILJET_API_KEY && MAILJET_SECRET_KEY) list.push({ name: "Mailjet", send: sendViaMailjet });
+    if (BREVO_API_KEY) list.push({ name: "Brevo", send: sendViaBrevo });
+    return list;
+}
+
+// ลองส่งไล่ทุก provider ที่ตั้งค่าไว้ตามลำดับ — ตัวไหนสำเร็จก็จบทันที
+// ถ้าตัวหนึ่งล้ม (คีย์เสีย/โควตาเต็ม/เครือข่าย) จะ fallback ไปตัวถัดไปแทนที่จะโยน error ทิ้ง
+// เดิมโค้ดใช้ if(...) return ตัวแรกที่มี key เท่านั้น → ถ้าตัวแรก (SMTP2GO) พัง ระบบส่งเมลตายทั้งระบบ
+// สุดท้ายถ้าทุก provider ล้ม (หรือไม่มีเลย) ค่อย fallback ไป SMTP (ใช้ตอน dev) แล้วโยน error รวม
+async function sendViaAnyProvider(payload, smtpOptions) {
+    const providers = enabledProviders();
+    const errors = [];
+    for (const p of providers) {
+        try {
+            await p.send(payload);
+            if (errors.length) console.warn(`ส่งอีเมลสำเร็จผ่าน ${p.name} (fallback หลังจาก ${errors.length} provider ก่อนหน้าล้ม)`);
+            return;
+        } catch (err) {
+            const msg = (err && err.message) || String(err);
+            console.error(`ส่งอีเมลผ่าน ${p.name} ล้มเหลว:`, msg);
+            errors.push(`${p.name}: ${msg}`);
+        }
+    }
+
+    // ไม่มี HTTP provider สำเร็จเลย — ลอง SMTP (ใช้ได้เฉพาะ dev / เครื่องที่ต่อ Gmail SMTP ได้)
+    if (MAIL_USER && MAIL_PASS) {
+        try {
+            await sendWithRetry(smtpOptions);
+            if (errors.length) console.warn("ส่งอีเมลสำเร็จผ่าน SMTP (fallback สุดท้าย)");
+            return;
+        } catch (err) {
+            errors.push(`SMTP: ${(err && err.message) || String(err)}`);
+        }
+    }
+
+    if (!providers.length && !(MAIL_USER && MAIL_PASS)) {
+        throw new Error("ยังไม่ได้ตั้งค่าผู้ให้บริการอีเมลใด ๆ (SMTP2GO/SendGrid/Resend/Mailjet/Brevo หรือ MAIL_USER+MAIL_PASS)");
+    }
+    throw new Error("ส่งอีเมลไม่สำเร็จทุกช่องทาง — " + errors.join(" | "));
+}
+
 // ส่งอีเมลพร้อมแนบไฟล์ PDF
 // to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ, pdfBuffer: Buffer ของ PDF, filename: ชื่อไฟล์แนบ
 async function sendInvoiceMail({ to, subject, text, pdfBuffer, filename }) {
     const attachments = [{ filename, content: pdfBuffer, contentType: "application/pdf" }];
-    // ลำดับ: SMTP2GO → SendGrid → Resend → Mailjet → Brevo → SMTP (dev) — ตัวไหนตั้ง key ไว้ใช้ตัวนั้น
-    if (SMTP2GO_API_KEY) return void (await sendViaSmtp2go({ to, subject, text, attachments }));
-    if (SENDGRID_API_KEY) return void (await sendViaSendgrid({ to, subject, text, attachments }));
-    if (RESEND_API_KEY) return void (await sendViaResend({ to, subject, text, attachments }));
-    if (MAILJET_API_KEY && MAILJET_SECRET_KEY) return void (await sendViaMailjet({ to, subject, text, attachments }));
-    if (BREVO_API_KEY) return void (await sendViaBrevo({ to, subject, text, attachments }));
-    await sendWithRetry({ from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text, attachments });
+    await sendViaAnyProvider(
+        { to, subject, text, attachments },
+        { from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text, attachments }
+    );
 }
 
 // ส่งอีเมลข้อความธรรมดา (ไม่มีไฟล์แนบ) — ใช้กับอีเมลยืนยันการจอง / OTP
 // to: อีเมลผู้รับ, subject: หัวข้อ, text: ข้อความ
 async function sendMail({ to, subject, text }) {
-    if (SMTP2GO_API_KEY) return void (await sendViaSmtp2go({ to, subject, text }));
-    if (SENDGRID_API_KEY) return void (await sendViaSendgrid({ to, subject, text }));
-    if (RESEND_API_KEY) return void (await sendViaResend({ to, subject, text }));
-    if (MAILJET_API_KEY && MAILJET_SECRET_KEY) return void (await sendViaMailjet({ to, subject, text }));
-    if (BREVO_API_KEY) return void (await sendViaBrevo({ to, subject, text }));
-    await sendWithRetry({ from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text });
+    await sendViaAnyProvider(
+        { to, subject, text },
+        { from: `${MAIL_FROM_NAME} <${MAIL_USER}>`, to, subject, text }
+    );
 }
 
 module.exports = { sendInvoiceMail, sendMail };
