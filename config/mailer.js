@@ -327,16 +327,17 @@ async function buildTransporter(port) {
         tls: { servername: SMTP_HOST }, // host เป็น IP จึงต้องบอกชื่อโดเมนจริงให้ TLS ตรวจใบรับรอง
         family: 4,
         pool: false,
-        connectionTimeout: 15000, // รอเชื่อมต่อ SMTP สูงสุด 15 วิ
-        greetingTimeout: 15000,
-        socketTimeout: 20000,
+        connectionTimeout: 8000, // รอเชื่อมต่อ SMTP สูงสุด 8 วิ — Render throttle SMTP บ่อย ลดเวลารอให้รีบล้มไปพอร์ตถัดไป
+        greetingTimeout: 8000,
+        socketTimeout: 10000,
     });
 }
 
 // ส่งอีเมลพร้อม retry + สลับพอร์ต — Render ต่อ Gmail หลุด/ช้าเป็นครั้งคราว และบางพอร์ตอาจถูกบล็อก
-// ลองสลับ 465 → 587 → 465 (แต่ละครั้งสุ่ม IP ใหม่ด้วย) เพื่อเพิ่มโอกาสต่อติด
+// ลองสลับ 465 → 587 (แต่ละครั้งสุ่ม IP ใหม่ด้วย) เพื่อเพิ่มโอกาสต่อติด
+// ตัดรอบที่ 3 (465 ซ้ำ) ออก เพราะถ้า 2 พอร์ตแรกยังไม่ติด รอบซ้ำก็มักไม่ช่วย แถมทำให้รอนานขึ้นอีก 1 timeout
 async function sendWithRetry(mailOptions) {
-    const portSequence = [465, 587, 465];
+    const portSequence = [465, 587];
     let lastErr;
     for (let i = 0; i < portSequence.length; i++) {
         const port = portSequence[i];
@@ -348,7 +349,7 @@ async function sendWithRetry(mailOptions) {
         } catch (err) {
             lastErr = err;
             console.error(`sendMail attempt ${i + 1} (port ${port}) failed:`, err && err.message);
-            if (i < portSequence.length - 1) await new Promise((r) => setTimeout(r, 1000));
+            if (i < portSequence.length - 1) await new Promise((r) => setTimeout(r, 500));
         }
     }
     throw lastErr;
