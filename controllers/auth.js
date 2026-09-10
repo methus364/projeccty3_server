@@ -344,6 +344,34 @@ function maskEmail(email) {
   return `${first}****${last}@${domain}`;
 }
 
+// ส่งอีเมล OTP แบบเบื้องหลัง + retry หลายรอบ เพื่อเพิ่มโอกาสส่งติด (SMTP บน Render หลุดเป็นครั้งคราว)
+// ฟังก์ชันนี้จับ error เองทั้งหมด ไม่โยนต่อ — จึงเรียกแบบไม่ await ได้โดยไม่เกิด unhandled rejection
+async function sendOtpMailInBackground({ to, username, code }) {
+  const mailOptions = {
+    to,
+    subject: "รหัส OTP สำหรับเปลี่ยนรหัสผ่าน — หอพัก Around Loei",
+    text:
+      `สวัสดีคุณ ${username}\n\n` +
+      `รหัส OTP สำหรับเปลี่ยนรหัสผ่านของคุณคือ: ${code}\n\n` +
+      `รหัสนี้จะหมดอายุใน 5 นาที กรุณาอย่าเปิดเผยรหัสนี้แก่ผู้อื่น\n` +
+      `หากคุณไม่ได้เป็นผู้ร้องขอ กรุณาเพิกเฉยต่ออีเมลฉบับนี้`,
+  };
+
+  // ลองส่งสูงสุด 3 รอบ เว้นระยะ 3 วิ ระหว่างรอบ — แต่ละรอบ sendMail จะสุ่ม IP Gmail ใหม่ โอกาสต่อติดเพิ่มขึ้น
+  const maxRounds = 3;
+  for (let round = 1; round <= maxRounds; round++) {
+    try {
+      await sendMail(mailOptions);
+      if (round > 1) console.log(`ส่ง OTP ไปที่ ${to} สำเร็จในรอบที่ ${round}`);
+      return;
+    } catch (err) {
+      console.error(`ส่ง OTP รอบที่ ${round} ล้มเหลว:`, err && err.message);
+      if (round < maxRounds) await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+  console.error(`ส่ง OTP ไปที่ ${to} ไม่สำเร็จหลังพยายามครบ ${maxRounds} รอบ`);
+}
+
 // --- ส่งรหัส OTP ไปที่อีเมล ---
 // รับ { identifier } (อีเมลหรือชื่อผู้ใช้) → หาอีเมลของบัญชีนั้นจาก DB แล้วส่ง OTP ไปให้
 // (รองรับ field เดิม email/username เพื่อความเข้ากันได้ย้อนหลัง)
@@ -364,22 +392,13 @@ exports.sendOtp = async (req, res) => {
       });
     }
 
-    // สร้าง OTP (คีย์ด้วย username + อีเมลจาก DB เสมอ ให้ทุกขั้นตอนใช้คีย์เดียวกัน) แล้วส่งอีเมล
+    // สร้าง OTP (คีย์ด้วย username + อีเมลจาก DB เสมอ ให้ทุกขั้นตอนใช้คีย์เดียวกัน)
     const code = createOtp(user.username, user.email);
-    try {
-      await sendMail({
-        to: user.email,
-        subject: "รหัส OTP สำหรับเปลี่ยนรหัสผ่าน — หอพัก Around Loei",
-        text:
-          `สวัสดีคุณ ${user.username}\n\n` +
-          `รหัส OTP สำหรับเปลี่ยนรหัสผ่านของคุณคือ: ${code}\n\n` +
-          `รหัสนี้จะหมดอายุใน 5 นาที กรุณาอย่าเปิดเผยรหัสนี้แก่ผู้อื่น\n` +
-          `หากคุณไม่ได้เป็นผู้ร้องขอ กรุณาเพิกเฉยต่ออีเมลฉบับนี้`,
-      });
-    } catch (mailErr) {
-      console.error("Send OTP mail error:", mailErr);
-      return res.status(502).json({ success: false, message: "ส่งอีเมลไม่สำเร็จ กรุณาลองใหม่อีกครั้ง" });
-    }
+
+    // ส่งอีเมลแบบเบื้องหลัง (ไม่ await) — ตอบ success กลับทันทีให้ผู้ใช้เข้าหน้ากรอก OTP ได้เลย
+    // เหตุผล: SMTP บน Render ช้า/หลุดบ่อย ถ้ารอส่งเมลเสร็จก่อนตอบ ผู้ใช้จะค้างนานหรือเจอ error 502
+    // OTP ถูกเก็บฝั่ง server แล้ว ต่อให้เมลมาช้าจากการ retry รหัสก็ยังใช้ได้ภายใน 5 นาที
+    sendOtpMailInBackground({ to: user.email, username: user.username, code });
 
     // คืนอีเมลแบบปิดบังบางส่วน ให้หน้าจอแสดงว่าส่งไปที่ไหน
     res.json({
