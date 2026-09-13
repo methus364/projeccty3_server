@@ -13,6 +13,8 @@ const STATEMENTS = [
   `ALTER TABLE Members ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ`,
   // กันอีเมลซ้ำ (partial index — ข้ามแถวที่ email เป็น NULL เช่นบัญชี social ที่ provider ไม่ส่งอีเมลมา)
   `CREATE UNIQUE INDEX IF NOT EXISTS members_email_key ON Members (email) WHERE email IS NOT NULL`,
+  // หมายเหตุการยกเลิกการจอง (แอดมินกรอกตอนกดยกเลิก/ปฏิเสธ) — โชว์ให้ลูกค้าเห็นเหตุผล
+  `ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancel_reason TEXT`,
 ];
 
 // รันเป็นลำดับ — ไม่ throw ออกไปให้ process ล้ม (log ไว้พอ) เพื่อไม่ให้เซิร์ฟเวอร์บูตไม่ขึ้น

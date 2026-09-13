@@ -395,15 +395,23 @@ exports.checkbooking = async (req, res) => {
                 to_char(b.booking_date, 'YYYY-MM-DD"T"HH24:MI:SS') AS "bookedAt",
                 b.booking_status AS "bookingStatus",
                 b.rent_type      AS "rentType",
+                b.cancel_reason  AS "cancelReason",
                 r.room_number    AS "roomNumber",
                 r.type_name      AS "roomType",
                 r.room_price     AS "pricePerDay",
-                r.price_monthly  AS "priceMonthly"
+                r.price_monthly  AS "priceMonthly",
+                -- ยืนยันมัดจำจริงหรือยัง = มีการชำระที่แอดมิน "ยืนยันแล้ว" ผูกกับการจองนี้
+                --   ใช้แยกป้าย 'ยืนยันการจอง' (เขียว) ออกจาก 'รออนุมัติสลิป' ฝั่งลูกค้า
+                EXISTS (
+                    SELECT 1 FROM invoices i
+                    JOIN payments p ON p.invoice_id = i.invoice_id
+                    WHERE i.booking_id = b.booking_id AND p.payment_status = 'ยืนยันแล้ว'
+                ) AS "depositConfirmed"
             FROM bookings b
             JOIN rooms r ON b.room_id = r.room_id
             WHERE b.member_id = $1
-              -- ไม่โชว์รายการที่ยังไม่ชำระ (รอชำระมัดจำ) หรือถูกยกเลิก — ประวัติมีเฉพาะการจองที่ชำระแล้ว/ใช้งานจริง
-              AND b.booking_status NOT IN ('รอชำระมัดจำ', 'ยกเลิก')
+              -- ไม่โชว์รายการที่ยังไม่ชำระ (รอชำระมัดจำ) — ประวัติมีเฉพาะการจองที่ชำระแล้ว/ยืนยัน/ยกเลิก
+              AND b.booking_status <> 'รอชำระมัดจำ'
             ORDER BY b.booking_date DESC
         `;
 
@@ -603,7 +611,7 @@ exports.adminCreateBooking = async (req, res) => {
 exports.editBooking = async (req, res) => {
     const client = await pool.connect();
     const { id } = req.params;
-    const { startDate, endDate, status, roomId, userId } = req.body;
+    const { startDate, endDate, status, roomId, userId, cancelReason } = req.body;
 
     try {
         await client.query("BEGIN");
@@ -705,6 +713,14 @@ exports.editBooking = async (req, res) => {
         const finalStatus = status || current.booking_status;
         if (finalStatus === 'ยกเลิก' || finalStatus === 'ย้ายออกแล้ว') {
             await client.query(`UPDATE rooms SET room_status = 'ว่าง' WHERE room_id = $1`, [targetRoomId]);
+
+            // ยกเลิก: เก็บหมายเหตุที่แอดมิน/ผู้เช่ากรอก ไว้โชว์ให้ลูกค้าเห็นเหตุผล
+            if (finalStatus === 'ยกเลิก' && cancelReason) {
+                await client.query(
+                    `UPDATE bookings SET cancel_reason = $1 WHERE booking_id = $2`,
+                    [cancelReason, id]
+                );
+            }
 
             // ยกเลิกการจอง → เก็บกวาดบิล/การชำระที่ผูกกับการจองนี้ ไม่ให้ค้างในระบบ
             //   - บิลที่ยังค้าง (ยังไม่ชำระ/ชำระบางส่วน) → 'ยกเลิก' · บิล 'ชำระแล้ว' คงไว้ (เงินที่รับจริง เช่น มัดจำที่ริบ)

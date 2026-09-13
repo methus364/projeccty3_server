@@ -300,7 +300,7 @@ exports.createPayment = async (req, res) => {
 exports.verifyPayment = async (req, res) => {
     const client = await pool.connect();
     const { id } = req.params;
-    const { action } = req.body;
+    const { action, reason } = req.body;
 
     if (!["approve", "reject"].includes(action)) {
         client.release();
@@ -350,9 +350,11 @@ exports.verifyPayment = async (req, res) => {
             if (bk
                 && ["รอชำระมัดจำ", "ยืนยันการจอง"].includes(bk.booking_status)
                 && result.status === "ยังไม่ชำระ") {
+                // เก็บหมายเหตุยกเลิก (เหตุผลที่แอดมินกรอกตอนปฏิเสธ · ถ้าไม่กรอกใช้ข้อความมาตรฐาน)
+                const cancelNote = (reason && reason.trim()) || "แอดมินปฏิเสธการชำระเงิน (สลิปไม่ถูกต้อง)";
                 await client.query(
-                    `UPDATE bookings SET booking_status = 'ยกเลิก', hold_expires_at = NULL WHERE booking_id = $1`,
-                    [bk.booking_id]
+                    `UPDATE bookings SET booking_status = 'ยกเลิก', hold_expires_at = NULL, cancel_reason = $2 WHERE booking_id = $1`,
+                    [bk.booking_id, cancelNote]
                 );
                 await client.query(`UPDATE rooms SET room_status = 'ว่าง' WHERE room_id = $1`, [bk.room_id]);
                 bookingCancelled = true;
