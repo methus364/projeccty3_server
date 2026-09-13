@@ -358,7 +358,7 @@ exports.getMyInvoices = async (req, res) => {
             `SELECT
                 i.invoice_id, i.booking_id, i.invoice_date, i.due_date,
                 i.room_cost, i.water_cost, i.elec_cost, i.total_amount, i.invoice_status,
-                r.room_number
+                r.room_number, b.rent_type, b.check_in_date, b.check_out_date
              FROM invoices i
              JOIN bookings b ON i.booking_id = b.booking_id
              JOIN rooms r ON b.room_id = r.room_id
