@@ -65,9 +65,36 @@ exports.getSummary = async (req, res) => {
                )`
         );
 
-        // รอผลทั้ง 5 query พร้อมกัน
-        const [revenueRes, roomRes, debtRes, repairRes, meterRes] = await Promise.all([
-            revenuePromise, roomPromise, debtPromise, repairPromise, meterPromise,
+        // --- 1.6 ห้องว่างสำหรับรายวัน "วันนี้" = ห้องที่ไม่ปิดปรับปรุง และไม่มีการจองคาบเกี่ยววันนี้ ---
+        const availDailyPromise = pool.query(
+            `SELECT COUNT(*) AS count
+             FROM rooms r
+             WHERE r.room_status <> 'ปิดปรับปรุง'
+               AND NOT EXISTS (
+                   SELECT 1 FROM bookings b
+                   WHERE b.room_id = r.room_id
+                     AND b.booking_status NOT IN ('ยกเลิก', 'ย้ายออกแล้ว')
+                     AND b.check_in_date <= CURRENT_DATE
+                     AND b.check_out_date > CURRENT_DATE
+               )`
+        );
+
+        // --- 1.7 ห้องว่างสำหรับรายเดือน = ห้องที่ไม่ปิดปรับปรุง และไม่มีผู้เช่ารายเดือนกำลังพักอยู่ ---
+        const availMonthlyPromise = pool.query(
+            `SELECT COUNT(*) AS count
+             FROM rooms r
+             WHERE r.room_status <> 'ปิดปรับปรุง'
+               AND NOT EXISTS (
+                   SELECT 1 FROM bookings b
+                   WHERE b.room_id = r.room_id
+                     AND b.rent_type = 'monthly'
+                     AND b.booking_status = 'กำลังเข้าพัก'
+               )`
+        );
+
+        // รอผลทุก query พร้อมกัน
+        const [revenueRes, roomRes, debtRes, repairRes, meterRes, availDailyRes, availMonthlyRes] = await Promise.all([
+            revenuePromise, roomPromise, debtPromise, repairPromise, meterPromise, availDailyPromise, availMonthlyPromise,
         ]);
 
         // แปลงผลลัพธ์ห้องเป็นออบเจกต์อ่านง่าย พร้อมยอดรวม
@@ -89,6 +116,9 @@ exports.getSummary = async (req, res) => {
                 unpaidInvoices: Number(debtRes.rows[0].unpaid_count),
                 pendingRepairs: Number(repairRes.rows[0].pending_repairs),
                 unrecordedMeters: Number(meterRes.rows[0]?.unrecorded || 0),
+                // ห้องว่างวันนี้ แยกตามประเภทการเช่า
+                availableDaily: Number(availDailyRes.rows[0].count),
+                availableMonthly: Number(availMonthlyRes.rows[0].count),
             },
         });
     } catch (error) {
@@ -214,5 +244,46 @@ exports.getDebtReport = async (req, res) => {
     } catch (error) {
         console.error("getDebtReport Error:", error.message);
         res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการดึงรายงานหนี้ค้างชำระ" });
+    }
+};
+
+// ==========================================
+// 5. สถิติผู้เข้าพัก แยกรายวัน/รายเดือน ตามช่วงเวลา (getOccupancyStats)
+//    GET /dashboard/occupancy-stats?start=YYYY-MM-DD&end=YYYY-MM-DD
+//    นับ "การจองที่เข้าพักคาบเกี่ยว" ช่วงที่เลือก แยกตาม rent_type
+//    (คาบเกี่ยว = check_in <= end AND check_out >= start · นับเฉพาะที่เช็คอินแล้ว/ย้ายออกแล้ว = พักจริง)
+// ==========================================
+exports.getOccupancyStats = async (req, res) => {
+    // ช่วงเวลา — ถ้าไม่ส่งมา default = เดือนปัจจุบัน (จัดรูปแบบจากเวลาท้องถิ่น ไม่ใช้ toISOString ที่เลื่อนเป็น UTC)
+    const fmtDate = (d) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    let { start, end } = req.query;
+    if (!start) start = fmtDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
+    if (!end) end = fmtDate(new Date());
+
+    try {
+        const result = await pool.query(
+            `SELECT
+                COUNT(*) FILTER (WHERE rent_type = 'daily')   AS daily,
+                COUNT(*) FILTER (WHERE rent_type = 'monthly') AS monthly
+             FROM bookings
+             WHERE booking_status IN ('กำลังเข้าพัก', 'ย้ายออกแล้ว')
+               AND check_in_date  <= $2
+               AND check_out_date >= $1`,
+            [start, end]
+        );
+
+        res.json({
+            success: true,
+            data: {
+                start,
+                end,
+                daily: Number(result.rows[0].daily),
+                monthly: Number(result.rows[0].monthly),
+            },
+        });
+    } catch (error) {
+        console.error("getOccupancyStats Error:", error.message);
+        res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการดึงสถิติผู้เข้าพัก" });
     }
 };
