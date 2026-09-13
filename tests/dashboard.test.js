@@ -113,10 +113,10 @@ test('getRevenue: months เกิน 24 → ถูกจำกัดที่ 2
   assert.equal(p[0], 24);
 });
 
-test('getRevenue: แปลง revenue เป็นตัวเลข', async () => {
+test('getRevenue: แปลง revenue เป็นตัวเลข + แยกรายวัน/รายเดือน', async () => {
   setHandler(() => ({ rows: [
-    { month: '2026-05', revenue: '0' },
-    { month: '2026-06', revenue: '3000' },
+    { month: '2026-05', revenue_daily: '0',    revenue_monthly: '0',    revenue: '0' },
+    { month: '2026-06', revenue_daily: '1000', revenue_monthly: '2000', revenue: '3000' },
   ] }));
   const req = { query: { months: '2' }, user: { id: 1, role: 'Admin' } };
   const res = makeRes();
@@ -124,7 +124,10 @@ test('getRevenue: แปลง revenue เป็นตัวเลข', async ()
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.count, 2);
-  assert.strictEqual(res.body.data[1].revenue, 3000); // number ไม่ใช่ string
+  // number ไม่ใช่ string ทั้งสามค่า
+  assert.strictEqual(res.body.data[1].revenue, 3000);
+  assert.strictEqual(res.body.data[1].revenueDaily, 1000);
+  assert.strictEqual(res.body.data[1].revenueMonthly, 2000);
 });
 
 // ============================================================

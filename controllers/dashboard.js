@@ -153,9 +153,12 @@ exports.getRevenue = async (req, res) => {
 
     try {
         // generate_series สร้างแถวครบทุกเดือน เดือนที่ไม่มีรายได้จะได้ 0 (ไม่ขาดช่วงในกราฟ)
+        // แยกรายได้ตามประเภทเช่า (รายวัน/รายเดือน) ด้วยการเชื่อม payments → invoices → bookings.rent_type
         const result = await pool.query(
             `SELECT
                 to_char(m.month, 'YYYY-MM') AS month,
+                COALESCE(SUM(CASE WHEN b.rent_type = 'daily'   THEN p.amount_paid ELSE 0 END), 0) AS revenue_daily,
+                COALESCE(SUM(CASE WHEN b.rent_type = 'monthly' THEN p.amount_paid ELSE 0 END), 0) AS revenue_monthly,
                 COALESCE(SUM(p.amount_paid), 0) AS revenue
              FROM generate_series(
                     date_trunc('month', CURRENT_DATE) - make_interval(months => $1 - 1),
@@ -165,15 +168,19 @@ exports.getRevenue = async (req, res) => {
              LEFT JOIN payments p
                     ON date_trunc('month', p.payment_date) = m.month
                    AND p.payment_status = 'ยืนยันแล้ว'
+             LEFT JOIN invoices i ON i.invoice_id = p.invoice_id
+             LEFT JOIN bookings b ON b.booking_id = i.booking_id
              GROUP BY m.month
              ORDER BY m.month`,
             [months]
         );
 
-        // แปลง revenue เป็นตัวเลข (pg คืน NUMERIC เป็น string)
+        // แปลงเป็นตัวเลข (pg คืน NUMERIC เป็น string)
         const data = result.rows.map((row) => ({
             month: row.month,
-            revenue: Number(row.revenue),
+            revenueDaily: Number(row.revenue_daily),     // รายได้จากผู้เช่ารายวัน
+            revenueMonthly: Number(row.revenue_monthly), // รายได้จากผู้เช่ารายเดือน
+            revenue: Number(row.revenue),                // รวมทั้งหมด
         }));
 
         res.json({ success: true, count: data.length, data });
