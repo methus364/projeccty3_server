@@ -66,8 +66,9 @@ exports.getSummary = async (req, res) => {
         );
 
         // --- 1.6 ห้องว่างสำหรับรายวัน "วันนี้" = ห้องที่ไม่ปิดปรับปรุง และไม่มีการจองคาบเกี่ยววันนี้ ---
+        //         แยกนับตามประเภทห้อง (type_name) เพื่อบอกว่าว่างประเภทไหนกี่ห้อง
         const availDailyPromise = pool.query(
-            `SELECT COUNT(*) AS count
+            `SELECT COALESCE(r.type_name, 'ไม่ระบุประเภท') AS type_name, COUNT(*) AS count
              FROM rooms r
              WHERE r.room_status <> 'ปิดปรับปรุง'
                AND NOT EXISTS (
@@ -76,12 +77,14 @@ exports.getSummary = async (req, res) => {
                      AND b.booking_status NOT IN ('ยกเลิก', 'ย้ายออกแล้ว')
                      AND b.check_in_date <= CURRENT_DATE
                      AND b.check_out_date > CURRENT_DATE
-               )`
+               )
+             GROUP BY r.type_name
+             ORDER BY r.type_name`
         );
 
-        // --- 1.7 ห้องว่างสำหรับรายเดือน = ห้องที่ไม่ปิดปรับปรุง และไม่มีผู้เช่ารายเดือนกำลังพักอยู่ ---
+        // --- 1.7 ห้องว่างสำหรับรายเดือน = ห้องที่ไม่ปิดปรับปรุง และไม่มีผู้เช่ารายเดือนกำลังพักอยู่ (แยกตามประเภทห้อง) ---
         const availMonthlyPromise = pool.query(
-            `SELECT COUNT(*) AS count
+            `SELECT COALESCE(r.type_name, 'ไม่ระบุประเภท') AS type_name, COUNT(*) AS count
              FROM rooms r
              WHERE r.room_status <> 'ปิดปรับปรุง'
                AND NOT EXISTS (
@@ -89,13 +92,21 @@ exports.getSummary = async (req, res) => {
                    WHERE b.room_id = r.room_id
                      AND b.rent_type = 'monthly'
                      AND b.booking_status = 'กำลังเข้าพัก'
-               )`
+               )
+             GROUP BY r.type_name
+             ORDER BY r.type_name`
         );
 
         // รอผลทุก query พร้อมกัน
         const [revenueRes, roomRes, debtRes, repairRes, meterRes, availDailyRes, availMonthlyRes] = await Promise.all([
             revenuePromise, roomPromise, debtPromise, repairPromise, meterPromise, availDailyPromise, availMonthlyPromise,
         ]);
+
+        // รวมยอดห้องว่าง + จัดรายการแยกประเภทห้อง (แปลง count เป็นตัวเลข)
+        const toByType = (rows) => rows.map((r) => ({ type_name: r.type_name, count: Number(r.count) }));
+        const sumCount = (rows) => rows.reduce((sum, r) => sum + Number(r.count), 0);
+        const availableDailyByType = toByType(availDailyRes.rows);
+        const availableMonthlyByType = toByType(availMonthlyRes.rows);
 
         // แปลงผลลัพธ์ห้องเป็นออบเจกต์อ่านง่าย พร้อมยอดรวม
         const rooms = { total: 0, vacant: 0, occupied: 0, maintenance: 0 };
@@ -116,9 +127,11 @@ exports.getSummary = async (req, res) => {
                 unpaidInvoices: Number(debtRes.rows[0].unpaid_count),
                 pendingRepairs: Number(repairRes.rows[0].pending_repairs),
                 unrecordedMeters: Number(meterRes.rows[0]?.unrecorded || 0),
-                // ห้องว่างวันนี้ แยกตามประเภทการเช่า
-                availableDaily: Number(availDailyRes.rows[0].count),
-                availableMonthly: Number(availMonthlyRes.rows[0].count),
+                // ห้องว่างวันนี้ แยกตามประเภทการเช่า + รายการแยกประเภทห้อง
+                availableDaily: sumCount(availDailyRes.rows),
+                availableMonthly: sumCount(availMonthlyRes.rows),
+                availableDailyByType,
+                availableMonthlyByType,
             },
         });
     } catch (error) {
