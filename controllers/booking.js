@@ -156,11 +156,15 @@ exports.createBooking = async (req, res) => {
         );
         const bookedAt = bookingRes.rows[0].booked_at; // เวลาที่จองจริง (ค่าเดียวจาก DB — ใช้ทั้งหน้าชำระ/ประวัติ)
 
-        // 5. อัปเดตสถานะห้องพักเป็น 'มีผู้เช่า'
-        await client.query(
-            `UPDATE rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`,
-            [roomId]
-        );
+        // 5. อัปเดตสถานะห้องพัก
+        //    รายเดือน: จองแล้วถือครองห้องทันที → 'มีผู้เช่า'
+        //    รายวัน: ยังไม่เปลี่ยน (ห้องจะเป็น 'มีผู้เช่า' ตอนแอดมินกดเช็คอินเท่านั้น)
+        if (rentType !== 'daily') {
+            await client.query(
+                `UPDATE rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`,
+                [roomId]
+            );
+        }
 
         await client.query("COMMIT");
 
@@ -302,7 +306,10 @@ exports.createBookingBatch = async (req, res) => {
             const bookingId = bookingRes.rows[0].booking_id;
             if (!bookedAt) bookedAt = bookingRes.rows[0].booked_at; // ใช้เวลาจองของห้องแรกเป็นตัวแทนทั้งชุด
 
-            await client.query(`UPDATE rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`, [roomId]);
+            // รายวัน: ยังไม่เปลี่ยนสถานะห้อง (เปลี่ยนตอนแอดมินเช็คอิน) · รายเดือน: จองแล้วมีผู้เช่าเลย
+            if (rentType !== 'daily') {
+                await client.query(`UPDATE rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`, [roomId]);
+            }
 
             bookings.push({
                 bookingId,
@@ -575,7 +582,10 @@ exports.adminCreateBooking = async (req, res) => {
             [userId, roomId, startDate, endDate, rentType]
         );
 
-        await client.query(`UPDATE rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`, [roomId]);
+        // รายวัน: ยังไม่เปลี่ยนสถานะห้อง (เปลี่ยนตอนแอดมินเช็คอิน) · รายเดือน: จองแล้วมีผู้เช่าเลย
+        if (rentType !== 'daily') {
+            await client.query(`UPDATE rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`, [roomId]);
+        }
         await client.query("COMMIT");
 
         res.status(201).json({ success: true, bookingId: bookingRes.rows[0].booking_id, totalPrice });
@@ -713,7 +723,11 @@ exports.editBooking = async (req, res) => {
                     [id]
                 );
             }
-        } else if (finalStatus === 'กำลังเข้าพัก' || finalStatus === 'ยืนยันการจอง') {
+        } else if (finalStatus === 'กำลังเข้าพัก') {
+            // เช็คอินแล้ว → ห้องมีผู้เช่า (ทั้งรายวัน/รายเดือน)
+            await client.query(`UPDATE rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`, [targetRoomId]);
+        } else if (finalStatus === 'ยืนยันการจอง' && rentType !== 'daily') {
+            // ยืนยันการจอง: รายเดือนถือครองห้องเลย · รายวันยังไม่ (ห้องเป็นมีผู้เช่าตอนเช็คอิน)
             await client.query(`UPDATE rooms SET room_status = 'มีผู้เช่า' WHERE room_id = $1`, [targetRoomId]);
         }
 

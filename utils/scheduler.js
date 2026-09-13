@@ -267,12 +267,84 @@ function startDueReminderCron() {
     console.log("[cron] ตั้งเวลาเตือนบิลใกล้/ครบกำหนดแล้ว (ทุกวัน 08:00 · ล่วงหน้า 3 วัน + วันครบกำหนด)");
 }
 
+// ============================================================
+// Cron เช็คเอาท์รายวันอัตโนมัติ — รันทุกวัน 02:00
+// ห้องรายวันจะ 'มีผู้เช่า' ตอนแอดมินกดเช็คอิน และ 'ว่าง' ตอนเช็คเอาท์
+// แต่ถ้าเลยวันออกแล้วแอดมินยังไม่กดเช็คเอาท์ ผังห้องจะค้าง 'มีผู้เช่า'
+//   → cron นี้ปิดการจองรายวันที่ 'กำลังเข้าพัก' + เลยวันออก (check_out_date < วันนี้) เป็น 'ย้ายออกแล้ว'
+//     แล้วคืนห้องเป็น 'ว่าง' ถ้าไม่มีผู้เช่าที่ยังเข้าพักอยู่จริงในห้องนั้น
+// ============================================================
+async function autoCheckoutExpiredDaily() {
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+
+        // 1. หา booking รายวันที่ยังเข้าพักอยู่ แต่เลยวันออกไปแล้ว
+        const res = await client.query(
+            `SELECT booking_id, room_id FROM bookings
+             WHERE rent_type = 'daily'
+               AND booking_status = 'กำลังเข้าพัก'
+               AND check_out_date < CURRENT_DATE
+             FOR UPDATE`
+        );
+
+        if (res.rows.length === 0) {
+            await client.query("COMMIT");
+            return;
+        }
+
+        const bookingIds = res.rows.map((r) => r.booking_id);
+        const roomIds = res.rows.map((r) => r.room_id);
+
+        // 2. ปิดการจองเหล่านี้เป็น 'ย้ายออกแล้ว'
+        await client.query(
+            `UPDATE bookings SET booking_status = 'ย้ายออกแล้ว' WHERE booking_id = ANY($1)`,
+            [bookingIds]
+        );
+
+        // 3. คืนห้องเป็น 'ว่าง' — เฉพาะห้องที่ไม่มีคนเข้าพักอยู่จริงแล้ว
+        //    (กันเคสห้องมีการจองรายวันคนละช่วงต่อกัน หรือมีผู้เช่ารายเดือนอยู่)
+        await client.query(
+            `UPDATE rooms SET room_status = 'ว่าง'
+             WHERE room_id = ANY($1)
+               AND NOT EXISTS (
+                   SELECT 1 FROM bookings b
+                   WHERE b.room_id = rooms.room_id
+                     AND b.booking_status = 'กำลังเข้าพัก'
+                     AND b.check_out_date >= CURRENT_DATE
+               )`,
+            [roomIds]
+        );
+
+        await client.query("COMMIT");
+        console.log(`[cron] เช็คเอาท์รายวันอัตโนมัติ ${bookingIds.length} รายการ`);
+    } catch (err) {
+        await client.query("ROLLBACK");
+        console.error("[cron] เช็คเอาท์รายวันอัตโนมัติล้มเหลว:", err.message);
+    } finally {
+        client.release();
+    }
+}
+
+function startDailyCheckoutCron() {
+    cron.schedule("0 2 * * *", async () => {
+        try {
+            await autoCheckoutExpiredDaily();
+        } catch (error) {
+            console.error("[cron] เช็คเอาท์รายวันอัตโนมัติล้มเหลว:", error.message);
+        }
+    });
+    console.log("[cron] ตั้งเวลาเช็คเอาท์รายวันอัตโนมัติแล้ว (ทุกวัน 02:00)");
+}
+
 module.exports = {
     startMonthlyBillingCron,
     startHoldExpiryCron,
     startRenewalReminderCron,
     startMeterReminderCron,
     startDueReminderCron,
+    startDailyCheckoutCron,
     cancelExpiredHolds,
+    autoCheckoutExpiredDaily,
     getUnrecordedMeterRooms,
 };
