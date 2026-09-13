@@ -128,7 +128,7 @@ async function loadFullInvoice(db, invoiceId) {
             b.check_in_date, b.check_out_date,
             m.full_name AS guest_name,
             m.email     AS guest_email,
-            r.room_number
+            r.room_number, r.type_name
          FROM invoices i
          JOIN bookings b ON i.booking_id = b.booking_id
          LEFT JOIN members m ON b.member_id = m.member_id
@@ -421,6 +421,39 @@ exports.getInvoicePdf = async (req, res) => {
 
         if (req.user.role !== "Admin" && invoice.member_id !== req.user.id) {
             return res.status(403).json({ success: false, message: "ไม่มีสิทธิ์เปิดใบแจ้งหนี้นี้" });
+        }
+
+        // ฝั่งผู้เช่า: บิลรายวันที่ "ชำระแล้ว" ให้ดูเป็น "ใบเสร็จ" แทนใบแจ้งหนี้
+        // (รายเดือน/ยังไม่ชำระ/ยกเลิก และฝั่ง Admin ยังเป็นใบแจ้งหนี้ตามเดิม)
+        const isTenant = req.user.role !== "Admin";
+        const showReceipt =
+            isTenant &&
+            invoice.invoice_status === "ชำระแล้ว" &&
+            invoice.rent_type === "daily";
+
+        if (showReceipt) {
+            // ดึงข้อมูลการชำระล่าสุดที่ยืนยันแล้ว เพื่อออกเลขที่/วันที่/วิธีชำระบนใบเสร็จ
+            const payRes = await pool.query(
+                `SELECT payment_id, payment_method, payment_date
+                 FROM payments
+                 WHERE invoice_id = $1 AND payment_status = 'ยืนยันแล้ว'
+                 ORDER BY payment_date DESC, payment_id DESC
+                 LIMIT 1`,
+                [id]
+            );
+            const payment = payRes.rows[0] || {};
+
+            const receiptData = {
+                ...invoice,
+                payment_id: payment.payment_id,
+                payment_method: payment.payment_method,
+                payment_date: payment.payment_date,
+                receipt_title: "ใบเสร็จ",
+            };
+            const pdfBuffer = await buildInvoicePdf(receiptData, "receipt");
+            res.setHeader("Content-Type", "application/pdf");
+            res.setHeader("Content-Disposition", `inline; filename="receipt-${id}.pdf"`);
+            return res.send(pdfBuffer);
         }
 
         const pdfBuffer = await buildInvoicePdf(invoice, "invoice");

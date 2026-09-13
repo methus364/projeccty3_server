@@ -118,12 +118,17 @@ async function buildInvoicePdf(invoice, mode = "invoice") {
             if (invoice.check_in_date) {
                 customerStack.push({ text: `วันเข้าพัก: ${thaiDate(invoice.check_in_date)}`, margin: [0, 2, 0, 0] });
             }
-        } else if (invoice.rent_type === "daily" && invoice.check_in_date && invoice.check_out_date) {
-            // ใบเสร็จรายวัน: โชว์ช่วงวันเข้าพัก-ออก (ไม่ระบุเลขห้อง)
-            customerStack.push({
-                text: `วันเข้าพัก: ${thaiDate(invoice.check_in_date)} - ${thaiDate(invoice.check_out_date)}`,
-                margin: [0, 2, 0, 0],
-            });
+        } else if (invoice.rent_type === "daily") {
+            // ใบเสร็จรายวัน: โชว์ประเภทห้องที่จอง (ไม่ระบุเลขห้อง) + ช่วงวันเข้าพัก-ออก
+            if (invoice.type_name) {
+                customerStack.push({ text: `ประเภทห้องที่จอง: ${invoice.type_name}`, margin: [0, 2, 0, 0] });
+            }
+            if (invoice.check_in_date && invoice.check_out_date) {
+                customerStack.push({
+                    text: `วันเข้าพัก: ${thaiDate(invoice.check_in_date)} - ${thaiDate(invoice.check_out_date)}`,
+                    margin: [0, 2, 0, 0],
+                });
+            }
         }
     } else {
         customerStack.push({ text: `นามลูกค้า: ${invoice.guest_name || "-"}  ห้อง ${invoice.room_number || "-"}` });
@@ -199,7 +204,7 @@ async function buildInvoicePdf(invoice, mode = "invoice") {
             {
                 table: {
                     headerRows: 1,
-                    widths: [25, "*", 45, 65, 70],
+                    widths: [40, "*", 45, 65, 70],
                     body: [
                         [
                             { text: "ลำดับ", style: "th", alignment: "center" },
