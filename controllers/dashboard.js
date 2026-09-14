@@ -97,9 +97,18 @@ exports.getSummary = async (req, res) => {
              ORDER BY r.type_name`
         );
 
+        // --- 1.8 ยอดขายสินค้าเดือนนี้ = ผลรวมเงิน + จำนวนชิ้นที่ขายได้ในเดือนปัจจุบัน ---
+        const productSalesPromise = pool.query(
+            `SELECT
+                COALESCE(SUM(total_price), 0) AS sales_revenue,
+                COALESCE(SUM(quantity), 0)    AS sales_qty
+             FROM sales
+             WHERE to_char(sale_date, 'YYYY-MM') = to_char(CURRENT_DATE, 'YYYY-MM')`
+        );
+
         // รอผลทุก query พร้อมกัน
-        const [revenueRes, roomRes, debtRes, repairRes, meterRes, availDailyRes, availMonthlyRes] = await Promise.all([
-            revenuePromise, roomPromise, debtPromise, repairPromise, meterPromise, availDailyPromise, availMonthlyPromise,
+        const [revenueRes, roomRes, debtRes, repairRes, meterRes, availDailyRes, availMonthlyRes, productSalesRes] = await Promise.all([
+            revenuePromise, roomPromise, debtPromise, repairPromise, meterPromise, availDailyPromise, availMonthlyPromise, productSalesPromise,
         ]);
 
         // รวมยอดห้องว่าง + จัดรายการแยกประเภทห้อง (แปลง count เป็นตัวเลข)
@@ -132,6 +141,9 @@ exports.getSummary = async (req, res) => {
                 availableMonthly: sumCount(availMonthlyRes.rows),
                 availableDailyByType,
                 availableMonthlyByType,
+                // ยอดขายสินค้าเดือนนี้ (ภาพรวม)
+                productSalesThisMonth: Number(productSalesRes.rows[0].sales_revenue),
+                productSoldQtyThisMonth: Number(productSalesRes.rows[0].sales_qty),
             },
         });
     } catch (error) {
